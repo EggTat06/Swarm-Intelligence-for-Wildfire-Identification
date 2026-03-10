@@ -34,3 +34,4 @@ frontend/.npm/
 *.swp
 *.swo
 .DS_Store
+frontend/public/drone_feed.png
