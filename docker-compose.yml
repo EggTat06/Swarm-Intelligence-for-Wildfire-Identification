@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    container_name: swarm_timescaledb
+    environment:
+      POSTGRES_USER: swarm_user
+      POSTGRES_PASSWORD: swarm_password
+      POSTGRES_DB: swarm_wildfire_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - timescaledb_data:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
+
+volumes:
+  timescaledb_data:
