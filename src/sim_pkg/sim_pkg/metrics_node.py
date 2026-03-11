@@ -6,13 +6,14 @@ import psycopg2
 from psycopg2.extras import Json
 import uuid
 import datetime
+from typing import Any
 
 
 class MetricsNode(Node):
     def __init__(self):
         super().__init__("metrics_node")
 
-        self.db_conn = None
+        self.db_conn: Any = None
         self.connect_to_db()
 
         # Subscribers
@@ -26,8 +27,8 @@ class MetricsNode(Node):
             String, "mission_control", self.mission_callback, 10
         )
 
-        self.current_mission_id = None
-        self.mission_start_time = None
+        self.current_mission_id: Any = None
+        self.mission_start_time: Any = None
 
         self.get_logger().info("Metrics Node Initialized.")
 
