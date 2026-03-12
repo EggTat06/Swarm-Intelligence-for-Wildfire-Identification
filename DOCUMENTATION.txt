@@ -1,0 +1,538 @@
+================================================================================
+  SWARM WILDFIRE IDENTIFICATION SYSTEM — DEVELOPER DOCUMENTATION
+================================================================================
+Last updated: 2026-03-11
+Project Root: /mnt/c/coding/swarm_wildfire_project
+
+--------------------------------------------------------------------------------
+TABLE OF CONTENTS
+--------------------------------------------------------------------------------
+  1. System Overview
+  2. Project Structure
+  3. How to Run the System
+  4. ROS 2 Nodes — What Each One Does
+  5. The Swarm Algorithm — Subsumption Architecture
+  6. How to Tune the Algorithm
+  7. Message Passing Between Nodes (ROS 2 Topics)
+  8. How to Control the Number of Drones
+  9. YOLO Fire Detection
+ 10. How Data is Stored in TimescaleDB
+ 11. Backend API Server (bridge.py)
+ 12. Frontend Dashboard
+ 13. Hardware Requirements for Real Drone Integration
+
+
+================================================================================
+  1. SYSTEM OVERVIEW
+================================================================================
+This project is a simulated multi-drone swarm system designed to autonomously
+detect wildfires. A fleet of simulated drones explores a 2D grid environment
+using a bio-inspired swarm algorithm. When a drone's camera detects fire, it
+is logged via YOLO-based vision processing. All telemetry, detections, and
+mission metadata are persisted in a TimescaleDB time-series database. A
+FastAPI backend and a Vite/React frontend provide real-time dashboards.
+
+The main components are:
+  - ROS 2 (Jazzy) — node-based middleware for inter-process communication
+  - TimescaleDB (Docker) — time-series storage for telemetry and detections
+  - FastAPI (Python) — REST/WebSocket bridge between ROS 2 and frontend
+  - Vite/React Frontend — live map/dashboard UI
+
+
+================================================================================
+  2. PROJECT STRUCTURE
+================================================================================
+swarm_wildfire_project/
+├── db/
+│   └── init.sql                  — SQL schema: creates all tables and hypertables
+├── docker-compose.yml            — Starts the TimescaleDB container
+├── frontend/                     — Vite/React dashboard UI
+│   └── src/
+├── run_all.sh                    — One-script launcher for the entire system
+├── server/
+│   └── bridge.py                 — FastAPI backend (REST + WebSocket)
+├── src/
+│   └── sim_pkg/
+│       └── sim_pkg/
+│           ├── drone_node.py         — Drone swarm agent logic + algorithm
+│           ├── environment_node.py   — Environment simulator (wind, grid, etc.)
+│           ├── metrics_node.py       — DB writer (telemetry, detections, missions)
+│           └── vision_processing.py  — YOLO fire detection / mock inference
+└── venv/                         — Python virtual environment
+
+
+================================================================================
+  3. HOW TO RUN THE SYSTEM
+================================================================================
+From the project root in a WSL terminal:
+
+    chmod +x run_all.sh   # (first-time only)
+    ./run_all.sh
+
+The script automatically:
+  1. Starts the TimescaleDB container via Docker Compose.
+  2. Sources ROS 2 Jazzy and creates/activates the Python virtual environment.
+  3. Installs Python deps (fastapi, uvicorn, psycopg2-binary, ultralytics).
+  4. Builds the ROS 2 workspace with `colcon build --symlink-install`.
+  5. Launches all 4 ROS 2 nodes in the background.
+  6. Starts the FastAPI backend on port 8000.
+  7. Starts the Vite frontend dev server on port 5173.
+
+Press Ctrl+C to stop everything cleanly.
+
+Access points once running:
+  Frontend:  http://localhost:5173
+  Backend:   http://localhost:8000
+  Database:  localhost:5432 (PostgreSQL credentials below)
+
+
+================================================================================
+  4. ROS 2 NODES — WHAT EACH ONE DOES
+================================================================================
+
+  FILE: src/sim_pkg/sim_pkg/environment_node.py
+  NODE NAME: environment_node
+  ─────────────────────────────────────────────
+  Simulates the physical environment. Publishes a JSON state every 5 seconds
+  to the `environment_state` topic containing:
+    - Grid dimensions (width × height in meters)
+    - Season (e.g., "Summer")
+    - Canopy density (0.0–1.0)
+    - Wind speed and direction (with random drift each cycle)
+    - Base terrain elevation
+
+  FILE: src/sim_pkg/sim_pkg/drone_node.py
+  NODE NAME: drone_node_<6-char-uuid>  (unique per instance)
+  ─────────────────────────────────────────────────────────────
+  The drone_node will implement swarm algorithm (see Section 5).
+  Each instance represents a single autonomous drone. It:
+    - Subscribes to `environment_state` for wind/grid data.
+    - Runs a control loop every 1 second to update position and heading.
+    - Publishes telemetry (position, battery, pheromone level) to `drone_telemetry`.
+
+  FILE: src/sim_pkg/sim_pkg/vision_processing.py
+  NODE NAME: vision_processing
+  ────────────────────────────────────────────────
+  Simulates an onboard camera and YOLO fire detector. It:
+    - Subscribes to `drone_telemetry` to get drone positions.
+    - If a drone comes within 100 m of the mock fire location (500, 500),
+      it simulates a YOLOv8 inference result (90% true positive rate).
+    - Publishes detection results (confidence, bounding box) to `yolo_detections`.
+  In production, this would subscribe to a real camera image stream
+  (sensor_msgs/Image) rather than telemetry coordinates.
+
+  FILE: src/sim_pkg/sim_pkg/metrics_node.py
+  NODE NAME: metrics_node
+  ──────────────────────────────────────────
+  The data persistence layer. It:
+    - Subscribes to: `drone_telemetry`, `yolo_detections`, `mission_control`.
+    - Writes all data to TimescaleDB via psycopg2.
+    - Manages mission lifecycle (start/end) via `mission_control` topic.
+
+
+================================================================================
+  5. THE SWARM ALGORITHM — SUBSUMPTION ARCHITECTURE
+================================================================================
+  File:     src/sim_pkg/sim_pkg/drone_node.py
+  Function: apply_subsumption_logic()  (line ~64)
+
+The drone uses a 3-level Subsumption Architecture — a behaviour-based
+robotics approach where lower-priority behaviours are suppressed by higher-
+priority ones. Levels are evaluated from lowest to highest priority:
+
+  LEVEL 1 — Random Perturbation (Obstacle Avoidance)
+  ────────────────────────────────────────────────────
+  With a 5% probability per control loop tick, the drone randomly adjusts
+  its heading by ±20 degrees. This prevents drones from getting stuck in
+  repetitive paths (simulating obstacle avoidance / local minima escape).
+
+    if random.random() < 0.05:
+        self.heading += random.uniform(-20, 20)
+
+  LEVEL 2 — Boundary Adherence (higher priority than Level 1)
+  ─────────────────────────────────────────────────────────────
+  If the drone comes within 50 m of any grid edge, it turns to face the
+  grid centre. This keeps all drones within the search area at all times.
+
+    padding = 50  # metres from the edge
+    if near_boundary:
+        self.heading = atan2(centre_y - y, centre_x - x)
+
+  LEVEL 3 — Dynamic Space Partitioning / Pheromone Wind Tracking
+  ───────────────────────────────────────────────────────────────
+  With a 10% probability per tick, the drone overrides its heading to
+  fly perpendicular to the current wind direction. This cross-wind search
+  pattern maximises area coverage (sweep search), which is the optimal
+  strategy for detecting fire smoke/heat carried on the wind.
+
+    if random.random() < 0.1:
+        self.heading = (wind_direction + 90) % 360
+
+  PHEROMONE MECHANISM
+  ────────────────────
+  Each drone transmits a "pheromone" value proportional to the local
+  canopy density (from environment_node). This is intended to represent
+  how strongly a drone marks a region as visited — denser canopy means
+  more potential fire fuel, so the drone signals stronger coverage need.
+
+    phero = 1.0 * env_data["canopy_density"]
+
+  BATTERY MODEL
+  ──────────────
+  Each drone consumes 0.1% battery per control loop tick (every second).
+  After 1000 seconds, battery reaches 0 and the drone stops.
+
+    self.battery -= 0.1
+
+
+================================================================================
+  6. HOW TO TUNE THE ALGORITHM
+================================================================================
+All tuneable parameters are localised in drone_node.py. Key values:
+
+  Parameter                  | Location                     | Default  | Effect
+  ─────────────────────────────────────────────────────────────────────────────────
+  speed                      | __init__ (line 27)           | 10.0 m/s | Drone speed
+  altitude                   | __init__ (line 24)           | 100.0 m  | Flight altitude
+  Random jitter probability  | apply_subsumption_logic L1   | 0.05     | Exploration chaos
+  Random jitter magnitude    | apply_subsumption_logic L1   | ±20 deg  | Turn sharpness
+  Boundary padding           | apply_subsumption_logic L2   | 50 m     | Edge buffer zone
+  Wind align probability     | apply_subsumption_logic L3   | 0.10     | How often cross-wind
+  Battery drain rate         | control_loop (line 45)       | 0.1/tick | Endurance
+  Control loop interval      | create_timer (line 32)       | 1.0 sec  | Update frequency
+
+  Environment parameters (environment_node.py):
+  Parameter                  | Default      | Effect
+  ────────────────────────────────────────────────────────────────────────────────
+  grid_width / grid_height   | 1000 m each  | Search area size
+  canopy_density             | 0.8          | Pheromone output strength
+  wind_speed                 | 5.0 m/s      | Influences search direction
+  wind_direction             | 45.0 degrees | Influences cross-wind heading
+
+  Vision parameters (vision_processing.py):
+  Parameter                  | Default | Effect
+  ────────────────────────────────────────────
+  mock_fire_x / mock_fire_y  | 500, 500 | Simulated fire position (metres)
+  detection_radius           | 100 m    | Camera field-of-view approximation
+
+
+================================================================================
+  7. MESSAGE PASSING BETWEEN NODES (ROS 2 TOPICS)
+================================================================================
+All communication uses the ROS 2 pub/sub model over named topics.
+Messages are serialised as JSON strings in std_msgs/String.
+
+  TOPIC NAME          | PUBLISHED BY        | SUBSCRIBED BY                   | Frequency
+  ───────────────────────────────────────────────────────────────────────────────────────
+  environment_state   | environment_node    | drone_node (all instances)      | Every 5s
+  drone_telemetry     | drone_node          | vision_processing, metrics_node | Every 1s (per drone)
+  yolo_detections     | vision_processing   | metrics_node                    | On detection event
+  mission_control     | (UI / manual)       | metrics_node                    | On demand
+
+  MESSAGE FORMATS
+  ────────────────
+  environment_state (JSON):
+    {
+      "grid": {"width": 1000, "height": 1000},
+      "season": "Summer",
+      "canopy_density": 0.8,
+      "wind": {"speed": 5.0, "direction": 45.0},
+      "topography": {"base_elevation": 500.0}
+    }
+
+  drone_telemetry (JSON):
+    {
+      "drone_id": "drone_node_a1b2c3",
+      "lat": 320.5,          // Mapped to Y coordinate in metres
+      "lon": 740.2,          // Mapped to X coordinate in metres
+      "alt": 100.0,          // Altitude in metres
+      "battery": 95.4,       // Percentage remaining
+      "pheromone": 0.8       // Pheromone level (0.0–1.0)
+    }
+
+  yolo_detections (JSON):
+    {
+      "drone_id": "drone_node_a1b2c3",
+      "timestamp": 1710000000.0,
+      "confidence": 0.92,
+      "bbox": {"x": 210, "y": 310, "w": 50, "h": 50},
+      "is_true_positive": true,
+      "model_used": "yolov8n-fire"
+    }
+
+  mission_control (JSON):
+    { "action": "start", "parameters": {"decay": 0.05, "radius": 50} }
+    { "action": "end",   "success": true }
+
+
+================================================================================
+  8. HOW TO CONTROL THE NUMBER OF DRONES
+================================================================================
+Currently, each instance of drone_node represents exactly ONE drone.
+To deploy multiple drones, you launch the node multiple times.
+
+  OPTION A — Manually (during development/testing):
+  ───────────────────────────────────────────────────
+  Open separate terminals (or use tmux) and run:
+
+    ros2 run sim_pkg drone_node &
+    ros2 run sim_pkg drone_node &
+    ros2 run sim_pkg drone_node &
+    # ... one command per drone
+
+  Each instance auto-generates a unique ID (drone_node_<6-char-uuid>)
+  and spawns at a random initial position within the grid.
+
+  OPTION B — Via a Launch File (recommended for larger swarms):
+  ──────────────────────────────────────────────────────────────
+  Create a ROS 2 launch file at:
+    src/sim_pkg/launch/swarm_launch.py
+
+  Example content to launch 10 drones:
+
+    from launch import LaunchDescription
+    from launch_ros.actions import Node
+
+    NUM_DRONES = 10  # <-- Change this number here
+
+    def generate_launch_description():
+        nodes = [Node(package='sim_pkg', executable='drone_node') for _ in range(NUM_DRONES)]
+        return LaunchDescription(nodes)
+
+  Then run with:
+    ros2 launch sim_pkg swarm_launch.py
+
+  KEY FUNCTIONS related to drone identity and init:
+  ──────────────────────────────────────────────────
+    DroneNode.__init__()        — Sets unique ID, random start position, all state
+    DroneNode.control_loop()    — Called every 1s; movement + battery consumption
+    DroneNode.apply_subsumption_logic() — The swarm algorithm (see Section 5)
+    DroneNode.publish_telemetry()       — Formats and publishes drone state to ROS
+
+
+================================================================================
+  9. YOLO FIRE DETECTION
+================================================================================
+  File: src/sim_pkg/sim_pkg/vision_processing.py
+
+In simulation mode, real camera frames are not used. Instead, the
+VisionProcessingNode monitors drone positions. If any drone's (x, y)
+coordinate falls within 100 metres of the mock fire at (500, 500), it
+simulates a YOLO inference result.
+
+To use a real YOLOv8 model:
+  1. Place your trained weights file (e.g., yolov8n-fire.pt) in the project.
+  2. Uncomment line 37 in vision_processing.py:
+       self.model = YOLO('yolov8n-fire.pt')
+  3. Update the node to subscribe to `sensor_msgs/Image` instead of telemetry.
+  4. Call `self.model.predict(image_frame)` on each incoming frame.
+
+The `ultralytics` library is auto-installed by run_all.sh.
+
+
+================================================================================
+  10. HOW DATA IS STORED IN TIMESCALEDB
+================================================================================
+  Schema file: db/init.sql
+  Container:   swarm_timescaledb (Docker)
+  Host:        localhost:5432
+  Database:    swarm_wildfire_db
+  Username:    swarm_user
+  Password:    swarm_password
+
+TimescaleDB is a PostgreSQL extension optimised for time-series data. The
+schema contains 3 tables:
+
+  ── TABLE: missions ─────────────────────────────────────────────────────────
+  Stores one row per swarm mission (start → end lifecycle).
+
+    Column                   | Type        | Description
+    ─────────────────────────────────────────────────────────────────────────
+    mission_id               | UUID (PK)   | Unique mission identifier
+    start_time               | TIMESTAMPTZ | Mission start timestamp
+    end_time                 | TIMESTAMPTZ | Mission end timestamp (nullable)
+    swarm_parameters         | JSONB       | Config used (decay rate, radius…)
+    time_to_first_detection  | FLOAT       | Seconds until first fire detect
+    success                  | BOOLEAN     | Whether fire was found
+
+  Written by: metrics_node.py → mission_callback() when action="start"/"end"
+  Triggered via: `mission_control` ROS topic
+
+  ── TABLE: telemetry (TimescaleDB Hypertable) ───────────────────────────────
+  High-frequency position and status log for every drone, every second.
+  Converted to a hypertable (automatically partitioned by time for fast queries).
+
+    Column          | Type         | Description
+    ────────────────────────────────────────────────────────────────────────
+    time            | TIMESTAMPTZ  | Timestamp of the reading (hypertable key)
+    drone_id        | VARCHAR(50)  | Drone's unique node name
+    mission_id      | UUID (FK)    | References missions table
+    latitude        | FLOAT        | Y coordinate in metres (simulation space)
+    longitude       | FLOAT        | X coordinate in metres (simulation space)
+    altitude        | FLOAT        | Altitude in metres
+    battery_level   | FLOAT        | Battery % remaining
+    pheromone_level | FLOAT        | Pheromone signal strength (0.0–1.0)
+
+  Written by: metrics_node.py → telemetry_callback() on every drone_telemetry msg
+  Note: Only written when a mission is active (current_mission_id is set).
+
+  ── TABLE: yolo_detections (TimescaleDB Hypertable) ────────────────────────
+  Stores each fire detection event, including the bounding box and confidence.
+
+    Column           | Type         | Description
+    ─────────────────────────────────────────────────────────────────────────
+    time             | TIMESTAMPTZ  | Detection timestamp (hypertable key)
+    drone_id         | VARCHAR(50)  | Drone that made the detection
+    mission_id       | UUID (FK)    | References missions table
+    confidence_score | FLOAT        | YOLO confidence (0.0–1.0)
+    bounding_box     | JSONB        | {x, y, w, h} pixel coords of fire box
+    image_reference  | VARCHAR(255) | Optional: path/ID to saved image file
+    is_true_positive | BOOLEAN      | True positive flag (for RL feedback)
+
+  Written by: metrics_node.py → yolo_callback() on every yolo_detections msg
+
+  HOW TO QUERY USING PSQL:
+  ─────────────────────────
+    docker exec -it swarm_timescaledb psql -U swarm_user -d swarm_wildfire_db
+
+  Useful queries:
+    SELECT * FROM missions ORDER BY start_time DESC LIMIT 10;
+    SELECT * FROM telemetry WHERE drone_id = 'drone_node_a1b2c3' ORDER BY time DESC LIMIT 50;
+    SELECT * FROM yolo_detections WHERE confidence_score > 0.9 ORDER BY time DESC;
+
+    -- TimescaleDB time-bucket aggregation (1-minute averages per drone):
+    SELECT time_bucket('1 minute', time) AS bucket, drone_id, AVG(battery_level)
+    FROM telemetry
+    GROUP BY bucket, drone_id
+    ORDER BY bucket DESC;
+
+  DATA FLOW SUMMARY:
+  ─────────────────
+    drone_node  ──[drone_telemetry]──▶  metrics_node  ──▶  telemetry table
+    vision_processing  ──[yolo_detections]──▶  metrics_node  ──▶  yolo_detections table
+    UI/manual  ──[mission_control]──▶  metrics_node  ──▶  missions table
+
+
+================================================================================
+  11. BACKEND API SERVER (bridge.py)
+================================================================================
+  File: server/bridge.py
+  Port: http://localhost:8000
+
+Built with FastAPI. Currently uses a mock ROS 2 bridge that generates
+simulated data. In production, this would integrate with rclpy directly.
+
+  Endpoint              | Method      | Description
+  ─────────────────────────────────────────────────────────────────────────
+  GET /history/missions | HTTP GET    | Returns recent mission history from DB
+  WS  /ws              | WebSocket   | Streams live telemetry + YOLO events to UI
+
+The WebSocket broadcasts two event types every 2 seconds (mock mode):
+  - "telemetry"      — drone position, battery, altitude
+  - "yolo_detection" — confidence score and bounding box
+
+Commands sent from the UI (e.g., "Deploy Swarm") arrive as WebSocket text
+messages and are printed to stdout; these would be forwarded to ROS 2 via
+a publisher in a full integration.
+
+
+================================================================================
+  12. FRONTEND DASHBOARD
+================================================================================
+  Directory: frontend/
+  URL:       http://localhost:5173
+
+A Vite/React single-page application. It connects to the FastAPI WebSocket
+(/ws) and renders live drone positions on a map, battery levels, and fire
+detection alerts.
+
+To install dependencies manually:
+    cd frontend && npm install
+
+To run independently:
+    cd frontend && npm run dev
+
+
+================================================================================
+  13. HARDWARE REQUIREMENTS FOR REAL DRONE INTEGRATION
+================================================================================
+To use this software with a physical drone instead of the simulation,
+the drone must meet the following requirements:
+
+  ONBOARD COMPUTE
+  ───────────────
+  • A companion computer capable of running ROS 2 (Jazzy or Humble).
+    Recommended boards:
+      - NVIDIA Jetson Orin Nano (8 GB) — preferred for running YOLOv8 inference
+      - Raspberry Pi 5 (8 GB) — suitable for telemetry-only nodes
+  • OS: Ubuntu 22.04 LTS (required for ROS 2 Jazzy compatibility)
+  • RAM: Minimum 4 GB (8 GB recommended for YOLO inference)
+  • Storage: Minimum 32 GB eMMC or SD card
+
+  FLIGHT CONTROLLER
+  ──────────────────
+  • Must support MAVLink protocol (e.g., Pixhawk 4/6, ArduPilot-based FCs)
+  • Interface to companion computer via UART or USB
+  • Supported via MAVROS (ROS 2 package) for position and command bridging
+
+  SENSORS REQUIRED
+  ─────────────────
+  • GPS module (for real-world lat/lon telemetry instead of simulated x/y)
+      - Minimum: u-blox M8N     (≥ 2.5 m accuracy)
+      - Preferred: u-blox F9P   (RTK, centimetre-level)
+  • Downward-facing RGB camera for fire detection:
+      - Minimum resolution: 1280×720 @ 30 fps
+      - Recommended: Sony IMX219 or equivalent
+      - Interface: CSI (preferred) or USB UVC
+  • IMU (usually built into flight controller)
+  • Barometer for altitude hold
+
+  NETWORK / COMMUNICATION
+  ────────────────────────
+  • Wi-Fi 802.11ac (5 GHz) for ground-station ROS topic bridging
+    OR a telemetry radio (e.g., SiK 915 MHz) for longer range
+  • Note: All ROS 2 nodes (drones + ground station) must be on the same
+    ROS_DOMAIN_ID and be network-reachable from each other
+  • Recommended range: ≥ 500 m line-of-sight to cover the 1000×1000 m grid
+
+  BATTERY & POWER
+  ────────────────
+  • LiPo battery sized to provide ≥ 20 minutes flight time
+    (current model assumes ~1000 second / ~16 minute endurance at battery drain rate 0.1/s)
+  • 5V BEC or dedicated power rail for companion computer
+  • Minimum power budget: 5W for companion computer
+
+  SOFTWARE CHANGES FOR REAL HARDWARE
+  ────────────────────────────────────
+  When transitioning from simulation to hardware, the following code changes
+  are needed:
+
+  1. drone_node.py:
+       - Replace self.x / self.y updates with real GPS coordinates subscribed
+         from a MAVROS topic: /mavros/global_position/local
+       - Replace self.battery with: /mavros/battery (sensor_msgs/BatteryState)
+
+  2. vision_processing.py:
+       - Replace the telemetry-distance mock with a real camera subscription:
+           self.image_sub = self.create_subscription(
+               Image, '/camera/image_raw', self.image_callback, 10)
+       - Uncomment and load the real YOLOv8 weights:
+           self.model = YOLO('yolov8n-fire.pt')
+       - Call self.model.predict(frame) inside image_callback.
+
+  3. metrics_node.py:
+       - Replace simulated lat/lon columns with real GPS decimal degrees.
+       - Add a `drone_ip` or `hardware_id` column to telemetry for
+         physical asset tracking.
+
+  FAILSAFE REQUIREMENTS
+  ──────────────────────
+  • Return-to-Home (RTH) triggered automatically when battery < 20%
+  • Geofencing: The boundary adherence logic in drone_node.py (Level 2)
+    must be paired with a hardware-level geofence in the flight controller
+  • All drones must run emergency landing behaviour if ROS comms are lost
+    for more than 5 seconds
+
+================================================================================
+  END OF DOCUMENTATION
+================================================================================
