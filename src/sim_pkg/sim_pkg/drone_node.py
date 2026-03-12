@@ -9,7 +9,7 @@ import uuid
 
 class DroneNode(Node):
     def __init__(self):
-        super().__init__("drone_node_" + str(uuid.uuid4().hex[:6]))
+        super().__init__("drone_node_" + str(uuid.uuid4())[:6])
         self.drone_id = self.get_name()
 
         # Publishers and Subscribers
@@ -26,7 +26,7 @@ class DroneNode(Node):
         self.heading = random.uniform(0, 360)  # degrees
         self.speed = 10.0  # m/s
 
-        self.env_data = None
+        self.env_data = {}
 
         # Control Loop
         self.timer = self.create_timer(1.0, self.control_loop)
@@ -103,8 +103,8 @@ class DroneNode(Node):
             "lat": self.y,  # mapped lazily to y
             "lon": self.x,  # mapped lazily to x
             "alt": self.altitude,
-            "battery": round(self.battery, 2),
-            "pheromone": round(phero, 2),
+            "battery": round(float(self.battery), 2),
+            "pheromone": round(float(phero), 2),
         }
         msg.data = json.dumps(payload)
         self.telemetry_pub.publish(msg)

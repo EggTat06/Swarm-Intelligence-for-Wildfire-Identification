@@ -27,13 +27,16 @@ source /opt/ros/jazzy/setup.bash || { echo "❌ Failed to source ROS 2 Jazzy"; e
 if [ ! -d "venv" ]; then
     echo "Creating Python virtual environment..."
     python3 -m venv venv --system-site-packages
-    source venv/bin/activate
-    pip install fastapi uvicorn setuptools psycopg2-binary ultralytics
-
     touch venv/COLCON_IGNORE
-else
-    source venv/bin/activate
 fi
+source venv/bin/activate
+# Always ensure required packages are installed (idempotent)
+pip install fastapi uvicorn setuptools psycopg2-binary ultralytics -q
+
+# Export venv site-packages onto PYTHONPATH so that colcon-generated entry
+# points (which hardcode #!/usr/bin/python3) can still find venv packages.
+VENV_SITE=$(python3 -c "import site; print(site.getsitepackages()[0])")
+export PYTHONPATH="${VENV_SITE}:${PYTHONPATH}"
 
 # Build ROS 2 packages
 colcon build --symlink-install || { echo "❌ Failed to build ROS 2 workspace"; exit 1; }

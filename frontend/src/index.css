@@ -4,6 +4,6 @@
 
 @layer base {
   body {
-    @apply bg-dark text-slate-100 antialiased overflow-hidden m-0;
+    @apply bg-gray-900 text-slate-100 antialiased overflow-hidden m-0;
   }
 }
