@@ -51,8 +51,8 @@ ros2 run sim_pkg environment_node &
 ENV_PID=$!
 sleep 1 # Give environment a moment to start
 
-ros2 run sim_pkg drone_node &
-DRONE_PID=$!
+ros2 run sim_pkg swarm_manager_node &
+SWARM_PID=$!
 
 ros2 run sim_pkg vision_processing &
 VISION_PID=$!
@@ -95,8 +95,7 @@ echo "   - Database: localhost:5432"
 echo ""
 echo "Press Ctrl+C to stop all services."
 
-# Trap Ctrl+C to kill all background processes
+
 trap "echo '🛑 Stopping system...'; kill $ENV_PID $DRONE_PID $VISION_PID $METRICS_PID $BACKEND_PID $FRONTEND_PID; exit 0" SIGINT SIGTERM
 
-# Wait indefinitely until interrupted
 wait

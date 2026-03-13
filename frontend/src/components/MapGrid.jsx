@@ -1,83 +1,183 @@
-import { useRef } from 'react'
+import { useRef, useEffect } from 'react'
 import { Canvas, useFrame } from '@react-three/fiber'
-import { OrbitControls, Grid, Environment } from '@react-three/drei'
+import { OrbitControls, Environment } from '@react-three/drei'
+import * as THREE from 'three'
 
-// Mock drone moving in a circle
-function Drone({ position, baseRadius, speed, color }) {
+// Constants for scaling the 651km world to screen space
+const SCALE = 3000.0;
+
+function Drone({ id, pose, color }) {
   const meshRef = useRef()
+  const targetPos = useRef(new THREE.Vector3(pose.x / SCALE, pose.alt / 100, pose.y / SCALE))
 
-  useFrame(({ clock }) => {
-    const t = clock.getElapsedTime()
-    meshRef.current.position.x = Math.cos(t * speed) * baseRadius
-    meshRef.current.position.z = Math.sin(t * speed) * baseRadius
-    // Hover effect
-    meshRef.current.position.y = 2 + Math.sin(t * 5 + baseRadius) * 0.5
+  useEffect(() => {
+    // Update target position when pose changes
+    targetPos.current.set(pose.x / SCALE, pose.alt / 100, pose.y / SCALE)
+  }, [pose])
+
+  useFrame((state, delta) => {
+    // Smoothly interpolate current position towards target position
+    if (meshRef.current) {
+      meshRef.current.position.lerp(targetPos.current, 0.1)
+    }
   })
 
   return (
-    <mesh ref={meshRef} position={position} castShadow>
-      <sphereGeometry args={[0.3, 16, 16]} />
-      <meshStandardMaterial color={color} emissive={color} emissiveIntensity={2} />
+    <group ref={meshRef}>
+      <mesh castShadow>
+        <sphereGeometry args={[0.8, 16, 16]} />
+        <meshStandardMaterial color={color} emissive={color} emissiveIntensity={2} />
+      </mesh>
+      {/* 6km Pheromone/Sensor Range Indicator */}
+      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.2, 0]}>
+        <ringGeometry args={[6000/SCALE - 0.2, 6000/SCALE, 32]} />
+        <meshBasicMaterial color={color} transparent opacity={0.3} />
+      </mesh>
+    </group>
+  )
+}
+
+function Wildfire({ fire, isIdentified }) {
+    const fireRef = useRef()
+    const color = isIdentified ? "#ff9500" : "#ff0000" // Orange if identified, Red if unknown
+
+    useFrame(({ clock }) => {
+        const t = clock.getElapsedTime()
+        if (fireRef.current) {
+            fireRef.current.scale.setScalar(1 + Math.sin(t * 8) * 0.1)
+        }
+    })
+
+    return (
+       <group position={[fire.x / SCALE, 1, fire.y / SCALE]}>
+           <mesh ref={fireRef} castShadow>
+               <sphereGeometry args={[fire.size / SCALE, 16, 16]} />
+               <meshStandardMaterial color={color} emissive={color} emissiveIntensity={2} />
+           </mesh>
+           <pointLight color={color} intensity={2} distance={30} />
+       </group>
+    )
+}
+
+function Factory({ entity }) {
+  const smokeLightRef = useRef()
+
+  useFrame(({ clock }) => {
+    const t = clock.getElapsedTime()
+    if (smokeLightRef.current) {
+        smokeLightRef.current.intensity = 1.5 + Math.sin(t * 10) * 0.5
+    }
+  })
+
+  return (
+    <group position={[entity.x / SCALE, 0.5, entity.y / SCALE]}>
+       <mesh castShadow receiveShadow position={[0, 0.5, 0]}>
+         <boxGeometry args={[entity.size/SCALE, 2, entity.size/SCALE]} />
+         <meshStandardMaterial color="#4A4A4A" roughness={0.9} />
+       </mesh>
+       <pointLight ref={smokeLightRef} position={[0, 3, 0]} color="#FF4500" distance={10} inline />
+       <mesh position={[entity.size/(SCALE*2.5), 2.5, entity.size/(SCALE*2.5)]}>
+         <cylinderGeometry args={[0.5, 0.5, 2, 8]} />
+         <meshStandardMaterial color="#2d2d2d" />
+       </mesh>
+    </group>
+  )
+}
+
+function Building({ entity }) {
+  const scaledH = entity.height / 100 // Visual height scale
+  return (
+    <mesh position={[entity.x / SCALE, scaledH/2, entity.y / SCALE]} castShadow receiveShadow>
+       <boxGeometry args={[entity.size/SCALE, scaledH, entity.size/SCALE]} />
+       <meshStandardMaterial color="#2E3B4E" roughness={0.7} border />
     </mesh>
   )
 }
 
-export default function MapGrid({ active }) {
+function Lake({ entity }) {
   return (
-    <div className="w-full h-full relative">
-      <Canvas shadows camera={{ position: [0, 15, 20], fov: 45 }}>
-        <color attach="background" args={['#0B0F19']} />
+    <mesh position={[entity.x / SCALE, 0.05, entity.y / SCALE]} rotation={[-Math.PI/2, 0, 0]} receiveShadow>
+       <planeGeometry args={[entity.size/SCALE, entity.size/SCALE]} />
+       <meshStandardMaterial color="#0A2C59" transparent opacity={0.6} roughness={0.1} />
+    </mesh>
+  )
+}
 
-        {/* Cinematic Lighting */}
-        <ambientLight intensity={0.2} />
-        <directionalLight position={[10, 20, 5]} intensity={1.5} castShadow />
-        <pointLight position={[0, 5, 0]} intensity={2} color="#FF4500" distance={20} />
+function Forest({ entity }) {
+  return (
+    <mesh position={[entity.x / SCALE, 0.5, entity.y / SCALE]} castShadow>
+       <coneGeometry args={[entity.size/(SCALE*2), 1.5, 8]} />
+       <meshStandardMaterial color="#1E5235" roughness={0.8} />
+    </mesh>
+  )
+}
 
-        {/* Environment Map for reflections */}
-        <Environment preset="night" />
+function World({ envState, identifiedFires }) {
+  if (!envState || !envState.entities) return null;
 
-        {/* High-tech Grid */}
-        <Grid
-          renderOrder={-1}
-          position={[0, 0, 0]}
-          infiniteGrid
-          cellSize={1}
-          cellThickness={0.5}
-          sectionSize={5}
-          sectionThickness={1}
-          sectionColor="#FF4500"
-          fadeDistance={50}
-          cellColor="#1E2A44"
-        />
+  const centerOffsetX = envState.grid.width / (2 * SCALE)
+  const centerOffsetY = envState.grid.height / (2 * SCALE)
 
-        {/* Center Target Indicator (Spawn point) */}
-        <mesh position={[0, 0.01, 0]} rotation={[-Math.PI / 2, 0, 0]}>
-          <ringGeometry args={[1.8, 2, 32]} />
+  return (
+    <group position={[-centerOffsetX, 0, -centerOffsetY]}>
+        {/* World Base Plane */}
+        <mesh rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
+          <planeGeometry args={[envState.grid.width/SCALE, envState.grid.height/SCALE]} />
+          <meshStandardMaterial color="#0b1720" roughness={1} />
+        </mesh>
+
+        {envState.entities.map(ent => {
+             switch(ent.type) {
+                 case 'factory': return <Factory key={ent.id} entity={ent} />
+                 case 'building': return <Building key={ent.id} entity={ent} />
+                 case 'lake': return <Lake key={ent.id} entity={ent} />
+                 case 'forest': return <Forest key={ent.id} entity={ent} />
+                 default: return null
+             }
+        })}
+
+        {envState.fires && envState.fires.map(fire => (
+             <Wildfire key={fire.id} fire={fire} isIdentified={identifiedFires.includes(fire.id)} />
+        ))}
+
+        {/* Center Target Indicator (Spawn point Home Base) */}
+        <mesh position={[centerOffsetX, 0.05, centerOffsetY]} rotation={[-Math.PI / 2, 0, 0]}>
+          <ringGeometry args={[3, 4, 32]} />
           <meshBasicMaterial color="#FF4500" transparent opacity={0.5} />
         </mesh>
+    </group>
+  )
+}
+
+
+export default function MapGrid({ active, envState, drones, identifiedFires = [] }) {
+  const centerOffset = envState?.grid?.width ? (envState.grid.width / (2 * SCALE)) : 50;
+
+  return (
+    <div className="w-full h-full relative">
+      <Canvas shadows camera={{ position: [0, 150, 150], fov: 45 }}>
+        <color attach="background" args={['#05080f']} />
+
+        <ambientLight intensity={0.2} />
+        <directionalLight position={[200, 300, 100]} intensity={1.5} castShadow shadow-mapSize={[2048, 2048]} shadow-camera-far={400} shadow-camera-left={-200} shadow-camera-right={200} shadow-camera-top={200} shadow-camera-bottom={-200} />
+
+        <Environment preset="night" />
+
+        <World envState={envState} identifiedFires={identifiedFires} />
 
         {/* Drones */}
-        {active && (
-          <>
-            <Drone position={[5, 2, 0]} baseRadius={8} speed={0.5} color="#00ffcc" />
-            <Drone position={[-3, 2.5, 3]} baseRadius={5} speed={-0.7} color="#00ffcc" />
-            <Drone position={[0, 1.5, -6]} baseRadius={12} speed={0.3} color="#00ffcc" />
-            <Drone position={[2, 2.2, 2]} baseRadius={6} speed={0.8} color="#00ffcc" />
-          </>
-        )}
-
-        {/* The Fire (Mocked target point) */}
-        <mesh position={[0, 0.5, 0]}>
-          <boxGeometry args={[1, 1, 1]} />
-          <meshStandardMaterial color="#FF4500" emissive="#FF4500" emissiveIntensity={active ? 2 : 0} />
-        </mesh>
+        <group position={[-centerOffset, 0, -centerOffset]}>
+          {active && drones && Object.values(drones).map(drone => (
+              <Drone key={drone.drone_id} id={drone.drone_id} pose={drone} color="#00ffcc" />
+          ))}
+        </group>
 
         <OrbitControls
           enableDamping
           dampingFactor={0.05}
-          maxPolarAngle={Math.PI / 2.1} // Prevent looking from below
-          minDistance={5}
-          maxDistance={40}
+          maxPolarAngle={Math.PI / 2.1}
+          minDistance={10}
+          maxDistance={400}
         />
       </Canvas>
 

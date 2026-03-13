@@ -20,7 +20,7 @@ setup(
     entry_points={
         "console_scripts": [
             "environment_node = sim_pkg.environment_node:main",
-            "drone_node = sim_pkg.drone_node:main",
+            "swarm_manager_node = sim_pkg.drone_node:main",
             "vision_processing = sim_pkg.vision_processing:main",
             "metrics_node = sim_pkg.metrics_node:main",
         ],
