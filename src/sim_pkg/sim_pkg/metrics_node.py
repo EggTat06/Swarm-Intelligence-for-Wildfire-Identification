@@ -104,22 +104,25 @@ class MetricsNode(Node):
 
         try:
             data = json.loads(msg.data)
+            # New batch format: {"type": "swarm_telemetry", "drones": [...]}
+            drones = data.get("drones", [])
             with self.db_conn.cursor() as cur:
-                cur.execute(
-                    """INSERT INTO telemetry (time, drone_id, mission_id, latitude, longitude, altitude, battery_level, pheromone_level)
-                       VALUES (NOW(), %s, %s, %s, %s, %s, %s, %s)""",
-                    (
-                        data["drone_id"],
-                        self.current_mission_id,
-                        data["lat"],
-                        data["lon"],
-                        data["alt"],
-                        data.get("battery", 100),
-                        data.get("pheromone", 0.0),
-                    ),
-                )
+                for drone in drones:
+                    cur.execute(
+                        """INSERT INTO telemetry (time, drone_id, mission_id, latitude, longitude, altitude, battery_level, pheromone_level)
+                           VALUES (NOW(), %s, %s, %s, %s, %s, %s, %s)""",
+                        (
+                            drone["drone_id"],
+                            self.current_mission_id,
+                            drone.get("y", 0.0),  # y → latitude (northing)
+                            drone.get("x", 0.0),  # x → longitude (easting)
+                            drone.get("alt", 0.0),
+                            drone.get("battery", 100.0),
+                            0.0,  # pheromone not used in DSP model
+                        ),
+                    )
         except Exception as e:
-            self.get_logger().debug(f"Telemetry error: {e}")
+            self.get_logger().debug(f"Telemetry DB error: {e}")
 
     def yolo_callback(self, msg):
         if not self.current_mission_id or not self.db_conn:

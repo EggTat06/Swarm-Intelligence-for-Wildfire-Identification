@@ -9,7 +9,42 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
 
+from fastapi.middleware.cors import CORSMiddleware
+import psycopg2
+from psycopg2.extras import RealDictCursor
+
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # In production, restrict this to the dashboard URL
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Database config
+DB_CONFIG = {
+    "host": "localhost",
+    "database": "swarm_wildfire_db",
+    "user": "swarm_user",
+    "password": "swarm_password",
+    "port": 5432,
+}
+
+
+def get_db_connection():
+    return psycopg2.connect(**DB_CONFIG)
+
+
+def init_db():
+    # Ensure connection works
+    try:
+        conn = get_db_connection()
+        conn.close()
+        print("Connected to TimescaleDB")
+    except Exception as e:
+        print(f"Database connection failed: {e}")
 
 
 class ConnectionManager:
@@ -32,7 +67,7 @@ class ConnectionManager:
 
 
 manager = ConnectionManager()
-loop = asyncio.get_event_loop()
+loop = None
 
 # Global reference to Node to allow FastAPI to publish
 ros_node = None
@@ -47,27 +82,85 @@ class FastAPIBridgeNode(Node):
         self.telemetry_sub = self.create_subscription(
             String, "drone_telemetry", self.telemetry_callback, 10
         )
+        self.notif_sub = self.create_subscription(
+            String, "drone_notifications", self.notif_callback, 10
+        )
         self.cmd_pub = self.create_publisher(String, "swarm_control", 10)
 
     def env_callback(self, msg):
         try:
             payload = json.loads(msg.data)
             payload["type"] = "environment_state"
-            asyncio.run_coroutine_threadsafe(
-                manager.broadcast(json.dumps(payload)), loop
-            )
+            if loop is not None:
+                asyncio.run_coroutine_threadsafe(
+                    manager.broadcast(json.dumps(payload)), loop
+                )
         except Exception as e:
             self.get_logger().error(f"Error parsing environment state: {e}")
 
     def telemetry_callback(self, msg):
         try:
-            # Passes the swarm batch telemetry through
             payload = json.loads(msg.data)
-            asyncio.run_coroutine_threadsafe(
-                manager.broadcast(json.dumps(payload)), loop
-            )
+
+            # If it's a mission report, save to DB
+            if payload.get("type") == "mission_report":
+                self.save_mission_to_db(payload)
+
+            if loop is not None:
+                asyncio.run_coroutine_threadsafe(
+                    manager.broadcast(json.dumps(payload)), loop
+                )
         except Exception as e:
             self.get_logger().error(f"Error parsing telemetry: {e}")
+
+    def save_mission_to_db(self, report):
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+
+            mission_id = str(uuid.uuid4())
+            start_time = datetime.datetime.fromtimestamp(report["start_time"])
+
+            cur.execute(
+                """
+                INSERT INTO missions (mission_id, start_time, end_time, swarm_parameters, time_to_first_detection, success)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    mission_id,
+                    start_time,
+                    start_time + datetime.timedelta(seconds=report["duration"]),
+                    json.dumps(
+                        {
+                            "drones": report["drones_deployed"],
+                            "coverage": report["area_coverage_pct"],
+                        }
+                    ),
+                    report["first_detection_seconds"],
+                    report["fires_identified"] > 0,
+                ),
+            )
+
+            # The schema has a 'telemetry' table. Let's use it for a few sample points or just store the whole path blob somewhere.
+            # For now, let's keep it simple and just save the mission.
+            # If we want to show paths later, we might need a another table or JSONB in missions.
+
+            conn.commit()
+            cur.close()
+            conn.close()
+            self.get_logger().info(f"Saved mission {mission_id} to database.")
+        except Exception as e:
+            self.get_logger().error(f"Failed to save mission to DB: {e}")
+
+    def notif_callback(self, msg):
+        try:
+            payload = json.loads(msg.data)
+            if loop is not None:
+                asyncio.run_coroutine_threadsafe(
+                    manager.broadcast(json.dumps(payload)), loop
+                )
+        except Exception as e:
+            self.get_logger().error(f"Error parsing notification: {e}")
 
     def publish_command(self, action_str):
         msg = String()
@@ -90,6 +183,9 @@ def run_ros2_node():
 
 @app.on_event("startup")
 async def startup_event():
+    global loop
+    loop = asyncio.get_running_loop()
+    init_db()
     ros2_thread = threading.Thread(target=run_ros2_node, daemon=True)
     ros2_thread.start()
 
@@ -104,7 +200,10 @@ async def websocket_endpoint(websocket: WebSocket):
 
             try:
                 cmd = json.loads(data)
-                if cmd.get("type") == "swarm_control" and ros_node:
+                # Handle RESET type from UI if needed, currently UI sends swarm_control directly
+                if (
+                    cmd.get("type") == "swarm_control" or cmd.get("action") == "RESET"
+                ) and ros_node:
                     ros_node.publish_command(json.dumps(cmd))
             except Exception as e:
                 print(f"Error parsing command from UI: {e}")
@@ -115,15 +214,17 @@ async def websocket_endpoint(websocket: WebSocket):
 
 @app.get("/history/missions")
 async def get_missions():
-    return [
-        {
-            "mission_id": str(uuid.uuid4()),
-            "start_time": datetime.datetime.now().isoformat(),
-            "time_to_first_detection": 142.5,
-            "success": True,
-            "swarm_parameters": {"decay": 0.05, "radius": 50},
-        }
-    ]
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("SELECT * FROM missions ORDER BY start_time DESC LIMIT 20")
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        return rows
+    except Exception as e:
+        print(f"Error fetching missions: {e}")
+        return []
 
 
 if __name__ == "__main__":

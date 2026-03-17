@@ -3,85 +3,89 @@ from rclpy.node import Node
 from std_msgs.msg import String
 import json
 import random
-import time
-
-try:
-    from ultralytics import YOLO
-
-    HAS_YOLO = True
-except ImportError:
-    HAS_YOLO = False
+import math
 
 
 class VisionProcessingNode(Node):
+    """
+    Simulated vision processing node.
+    Subscribes to the new batch swarm_telemetry format and checks each drone's
+    position against known CA fire cells.  Publishes yolo_detections for any
+    drone whose position falls within detection_radius of an active fire cell.
+    """
+
     def __init__(self):
         super().__init__("vision_processing")
 
-        # In a real environment, this subscribes to a sensor_msgs/Image topic.
-        # For the simulation, we subscribe to drone_telemetry to "see" if a drone is near a mocked fire.
         self.telemetry_sub = self.create_subscription(
             String, "drone_telemetry", self.telemetry_callback, 10
         )
-
+        self.env_sub = self.create_subscription(
+            String, "environment_state", self.env_callback, 10
+        )
         self.yolo_pub = self.create_publisher(String, "yolo_detections", 10)
 
-        # Mock fire location for simulation
-        self.mock_fire_x = 500.0
-        self.mock_fire_y = 500.0
-        self.detection_radius = (
-            100.0  # Drone must be within 100m to catch fire in camera FOV
-        )
+        self.env_data = {}
+        # How close a drone must be to a fire cell to trigger visual detection
+        self.detection_radius = 2_000.0  # 2 km
 
-        if HAS_YOLO:
-            self.get_logger().info("YOLOv8 library found. Initializing model...")
-            # self.model = YOLO('yolov8n-fire.pt') # Placeholder for real weights
-        else:
-            self.get_logger().info(
-                "YOLOv8 not installed. Falling back to mocked inference."
-            )
+        self.get_logger().info("VisionProcessingNode ready (batch telemetry format).")
+
+    def env_callback(self, msg):
+        try:
+            self.env_data = json.loads(msg.data)
+        except Exception as e:
+            self.get_logger().error(f"env_callback: {e}")
 
     def telemetry_callback(self, msg):
         try:
             data = json.loads(msg.data)
-            dx = data["lon"] - self.mock_fire_x
-            dy = data["lat"] - self.mock_fire_y
-            distance = (dx**2 + dy**2) ** 0.5
 
-            # If drone is close enough to the coordinates, simulate visual detection
-            if distance < self.detection_radius:
-                # Simulate "true positive" probability
-                is_true_positive = (
-                    random.random() > 0.1
-                )  # 90% confidence of true positive
-                confidence = random.uniform(0.75, 0.99)
+            # New batch format: {"type": "swarm_telemetry", "drones": [...]}
+            drones = data.get("drones", [])
+            if not drones:
+                return
 
-                # Mock bounding box coords
-                bbox = {
-                    "x": random.uniform(100, 400),
-                    "y": random.uniform(100, 400),
-                    "w": 50,
-                    "h": 50,
-                }
+            ca_cells = self.env_data.get("ca_cells", [])
+            burning_cells = [c for c in ca_cells if c.get("state", 0) in (1, 2)]
 
-                payload = {
-                    "drone_id": data["drone_id"],
-                    "timestamp": time.time(),
-                    "confidence": confidence,
-                    "bbox": bbox,
-                    "is_true_positive": is_true_positive,
-                    "model_used": "yolov8n-fire" if HAS_YOLO else "mocked-yolo",
-                }
+            for drone in drones:
+                drone_x = drone.get("x", 0.0)
+                drone_y = drone.get("y", 0.0)
+                drone_id = drone.get("drone_id", "unknown")
 
-                out_msg = String()
-                out_msg.data = json.dumps(payload)
-                self.yolo_pub.publish(out_msg)
-
-                self.get_logger().info(
-                    f"Fire Detected by {data['drone_id']} with confidence {confidence:.2f}"
-                )
+                for cell in burning_cells:
+                    dist = math.hypot(drone_x - cell["x"], drone_y - cell["y"])
+                    if dist < self.detection_radius:
+                        confidence = random.uniform(0.75, 0.99)
+                        payload = {
+                            "drone_id": drone_id,
+                            "cell_i": cell["i"],
+                            "cell_j": cell["j"],
+                            "fire_x": cell["x"],
+                            "fire_y": cell["y"],
+                            "fire_state": cell["state"],
+                            "confidence": round(confidence, 3),
+                            "is_true_positive": random.random() > 0.1,
+                            "model_used": "mocked-yolo",
+                            "bbox": {
+                                "x": random.uniform(100, 400),
+                                "y": random.uniform(100, 400),
+                                "w": 50,
+                                "h": 50,
+                            },
+                        }
+                        out_msg = String()
+                        out_msg.data = json.dumps(payload)
+                        self.yolo_pub.publish(out_msg)
+                        self.get_logger().info(
+                            f"Visual fire detection: {drone_id} near cell "
+                            f"({cell['i']},{cell['j']}) conf={confidence:.2f}"
+                        )
+                        break  # one detection per drone per tick is enough
 
         except Exception as e:
-            self.get_logger().error(f"Error in vision processing: {e}")
+            self.get_logger().error(f"vision_processing error: {e}")
 
 
 def main(args=None):

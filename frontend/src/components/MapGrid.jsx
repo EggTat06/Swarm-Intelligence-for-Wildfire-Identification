@@ -1,191 +1,445 @@
-import { useRef, useEffect } from 'react'
-import { Canvas, useFrame } from '@react-three/fiber'
+import { useRef, useEffect, useState, useCallback, useMemo } from 'react'
+import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import { OrbitControls, Environment } from '@react-three/drei'
 import * as THREE from 'three'
 
-// Constants for scaling the 651km world to screen space
-const SCALE = 3000.0;
+// 100km world → 200 Three.js units wide. 1 Three.js unit = 500m.
+const SCALE = 500.0
 
-function Drone({ id, pose, color }) {
-  const meshRef = useRef()
-  const targetPos = useRef(new THREE.Vector3(pose.x / SCALE, pose.alt / 100, pose.y / SCALE))
-
-  useEffect(() => {
-    // Update target position when pose changes
-    targetPos.current.set(pose.x / SCALE, pose.alt / 100, pose.y / SCALE)
-  }, [pose])
-
-  useFrame((state, delta) => {
-    // Smoothly interpolate current position towards target position
-    if (meshRef.current) {
-      meshRef.current.position.lerp(targetPos.current, 0.1)
-    }
-  })
-
-  return (
-    <group ref={meshRef}>
-      <mesh castShadow>
-        <sphereGeometry args={[0.8, 16, 16]} />
-        <meshStandardMaterial color={color} emissive={color} emissiveIntensity={2} />
-      </mesh>
-      {/* 6km Pheromone/Sensor Range Indicator */}
-      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.2, 0]}>
-        <ringGeometry args={[6000/SCALE - 0.2, 6000/SCALE, 32]} />
-        <meshBasicMaterial color={color} transparent opacity={0.3} />
-      </mesh>
-    </group>
-  )
+// Cell state → color mapping
+const STATE_COLORS = {
+  1: '#ffcc00',   // Early burn – yellow
+  2: '#ff3300',   // Full burn  – red
+  3: '#8b1a1a',   // Extinguish – dark red
+  4: '#222222',   // Ash        – dark grey
 }
 
-function Wildfire({ fire, isIdentified }) {
-    const fireRef = useRef()
-    const color = isIdentified ? "#ff9500" : "#ff0000" // Orange if identified, Red if unknown
-
-    useFrame(({ clock }) => {
-        const t = clock.getElapsedTime()
-        if (fireRef.current) {
-            fireRef.current.scale.setScalar(1 + Math.sin(t * 8) * 0.1)
-        }
-    })
-
-    return (
-       <group position={[fire.x / SCALE, 1, fire.y / SCALE]}>
-           <mesh ref={fireRef} castShadow>
-               <sphereGeometry args={[fire.size / SCALE, 16, 16]} />
-               <meshStandardMaterial color={color} emissive={color} emissiveIntensity={2} />
-           </mesh>
-           <pointLight color={color} intensity={2} distance={30} />
-       </group>
-    )
-}
-
-function Factory({ entity }) {
-  const smokeLightRef = useRef()
+// ─────────────────────────────────────────────
+// CA Cell quad (flat box on ground plane)
+// ─────────────────────────────────────────────
+function CaCell({ cell }) {
+  const color = STATE_COLORS[cell.state] || '#ff3300'
+  const cellSize = 500 / SCALE   // 500m in Three.js units
+  const ref = useRef()
 
   useFrame(({ clock }) => {
-    const t = clock.getElapsedTime()
-    if (smokeLightRef.current) {
-        smokeLightRef.current.intensity = 1.5 + Math.sin(t * 10) * 0.5
+    if (ref.current && cell.state === 2) {
+      ref.current.scale.y = 1 + Math.sin(clock.getElapsedTime() * 12 + cell.i) * 0.2
     }
   })
 
   return (
-    <group position={[entity.x / SCALE, 0.5, entity.y / SCALE]}>
-       <mesh castShadow receiveShadow position={[0, 0.5, 0]}>
-         <boxGeometry args={[entity.size/SCALE, 2, entity.size/SCALE]} />
-         <meshStandardMaterial color="#4A4A4A" roughness={0.9} />
-       </mesh>
-       <pointLight ref={smokeLightRef} position={[0, 3, 0]} color="#FF4500" distance={10} inline />
-       <mesh position={[entity.size/(SCALE*2.5), 2.5, entity.size/(SCALE*2.5)]}>
-         <cylinderGeometry args={[0.5, 0.5, 2, 8]} />
-         <meshStandardMaterial color="#2d2d2d" />
-       </mesh>
+    <group ref={ref} position={[cell.x / SCALE, cell.state === 2 ? 0.3 : 0.1, cell.y / SCALE]}>
+      <mesh castShadow>
+        <boxGeometry args={[cellSize * 0.9, cell.state === 2 ? 0.6 : 0.2, cellSize * 0.9]} />
+        <meshStandardMaterial color={color} emissive={color} emissiveIntensity={cell.state === 2 ? 1.5 : 0.5} />
+      </mesh>
+      {cell.state <= 2 && (
+        <pointLight color={color} intensity={cell.state === 2 ? 2 : 0.5} distance={8} />
+      )}
     </group>
   )
 }
 
-function Building({ entity }) {
-  const scaledH = entity.height / 100 // Visual height scale
+// ─────────────────────────────────────────────
+// Fog of war – explored circles (2D disc on ground)
+// ─────────────────────────────────────────────
+function ExploredCircles({ exploredCells, gridOffset }) {
+  const radius = 6000 / SCALE
   return (
-    <mesh position={[entity.x / SCALE, scaledH/2, entity.y / SCALE]} castShadow receiveShadow>
-       <boxGeometry args={[entity.size/SCALE, scaledH, entity.size/SCALE]} />
-       <meshStandardMaterial color="#2E3B4E" roughness={0.7} border />
-    </mesh>
+    <group position={[-gridOffset, 0.02, -gridOffset]}>
+      {Array.from(exploredCells).map(key => {
+        const [x, y] = key.split('|').map(Number)
+        return (
+          <mesh key={key} position={[x, 0, y]} rotation={[-Math.PI / 2, 0, 0]}>
+            <circleGeometry args={[radius, 24]} />
+            <meshBasicMaterial color="#00ffcc" transparent opacity={0.06} />
+          </mesh>
+        )
+      })}
+    </group>
   )
 }
 
+// ─────────────────────────────────────────────
+// Drone Path component (connected lines)
+// ─────────────────────────────────────────────
+function DronePath({ path, color }) {
+  const points = useMemo(() =>
+    path.map(p => new THREE.Vector3(p[0] / SCALE, 1.0, p[1] / SCALE)),
+    [path]
+  )
+
+  const geometry = useMemo(() => {
+    const geo = new THREE.BufferGeometry().setFromPoints(points)
+    return geo
+  }, [points])
+
+  return (
+    <line geometry={geometry}>
+      <lineBasicMaterial attach="material" color={color} linewidth={2} transparent opacity={0.6} />
+    </line>
+  )
+}
+
+// ─────────────────────────────────────────────
+// Drone component
+// ─────────────────────────────────────────────
+function Drone({ pose, isSelected, onSelect }) {
+  const groupRef = useRef()
+  const dspRef   = useRef()
+  const targetPos = useRef(new THREE.Vector3(pose.x / SCALE, (pose.alt || 90) / 30, pose.y / SCALE))
+  const dspPos    = useRef(new THREE.Vector3((pose.dsp_x ?? pose.x) / SCALE, 1.5, (pose.dsp_y ?? pose.y) / SCALE))
+
+  useEffect(() => {
+    targetPos.current.set(pose.x / SCALE, (pose.alt || 90) / 30, pose.y / SCALE)
+    if (pose.dsp_x != null) dspPos.current.set(pose.dsp_x / SCALE, 1.5, pose.dsp_y / SCALE)
+  }, [pose])
+
+  useFrame(({ clock }) => {
+    if (groupRef.current) groupRef.current.position.lerp(targetPos.current, 0.12)
+    if (dspRef.current) {
+      dspRef.current.position.lerp(dspPos.current, 0.08)
+      dspRef.current.rotation.y = clock.getElapsedTime() * 1.5
+    }
+  })
+
+  const droneColor = isSelected
+    ? (pose.state === 'COMMANDED' || pose.state === 'COMMANDED_WALK' ? '#ff8c00' : '#a855f7')
+    : '#00ffcc'
+
+  return (
+    <group>
+      {/* Drone body */}
+      <group ref={groupRef}>
+        <mesh castShadow onClick={(e) => { e.stopPropagation(); onSelect(pose.drone_id) }}
+          onPointerOver={(e) => { e.stopPropagation(); document.body.style.cursor = 'pointer' }}
+          onPointerOut={() => { document.body.style.cursor = 'auto' }}>
+          <sphereGeometry args={[isSelected ? 1.1 : 0.8, 16, 16]} />
+          <meshStandardMaterial color={droneColor} emissive={droneColor} emissiveIntensity={2.5} />
+        </mesh>
+        {/* 6km sensor range ring */}
+        <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.3, 0]}>
+          <ringGeometry args={[6000 / SCALE - 0.15, 6000 / SCALE, 48]} />
+          <meshBasicMaterial color={droneColor} transparent opacity={isSelected ? 0.5 : 0.2} side={THREE.DoubleSide} />
+        </mesh>
+        {isSelected && (
+          <pointLight color={droneColor} intensity={3} distance={15} />
+        )}
+      </group>
+      {/* DSP target point (always visible, more prominent when selected) */}
+      {pose.dsp_x != null && (
+        <group ref={dspRef}>
+          <mesh>
+            <octahedronGeometry args={[isSelected ? 2.5 : 1.2, 0]} />
+            <meshStandardMaterial color="#a855f7" emissive="#a855f7" wireframe
+              emissiveIntensity={2} transparent opacity={isSelected ? 0.9 : 0.4} />
+          </mesh>
+          {isSelected && (
+            <>
+              {/* Wireframe circle showing DSP area of influence */}
+              <mesh rotation={[-Math.PI / 2, 0, 0]}>
+                <ringGeometry args={[10, 12, 48]} />
+                <meshBasicMaterial color="#a855f7" transparent opacity={0.3} side={THREE.DoubleSide} />
+              </mesh>
+              <pointLight color="#a855f7" intensity={1} distance={20} />
+            </>
+          )}
+        </group>
+      )}
+    </group>
+  )
+}
+
+// ─────────────────────────────────────────────
+// Static entity components
+// ─────────────────────────────────────────────
+function Factory({ entity }) {
+  const ref = useRef()
+  useFrame(({ clock }) => {
+    if (ref.current) ref.current.intensity = 1.5 + Math.sin(clock.getElapsedTime() * 10) * 0.5
+  })
+  return (
+    <group position={[entity.x / SCALE, 0, entity.y / SCALE]}>
+      <mesh castShadow position={[0, 1, 0]}>
+        <boxGeometry args={[entity.size / SCALE, 2, entity.size / SCALE]} />
+        <meshStandardMaterial color="#4a4a4a" roughness={0.9} />
+      </mesh>
+      <pointLight ref={ref} position={[0, 3, 0]} color="#ff4500" distance={8} />
+    </group>
+  )
+}
+function Building({ entity }) {
+  const h = entity.height / 100
+  return (
+    <mesh castShadow position={[entity.x / SCALE, h / 2, entity.y / SCALE]}>
+      <boxGeometry args={[entity.size / SCALE, h, entity.size / SCALE]} />
+      <meshStandardMaterial color="#2e3b4e" roughness={0.7} />
+    </mesh>
+  )
+}
 function Lake({ entity }) {
   return (
-    <mesh position={[entity.x / SCALE, 0.05, entity.y / SCALE]} rotation={[-Math.PI/2, 0, 0]} receiveShadow>
-       <planeGeometry args={[entity.size/SCALE, entity.size/SCALE]} />
-       <meshStandardMaterial color="#0A2C59" transparent opacity={0.6} roughness={0.1} />
+    <mesh position={[entity.x / SCALE, 0.05, entity.y / SCALE]} rotation={[-Math.PI / 2, 0, 0]}>
+      <planeGeometry args={[entity.size / SCALE, entity.size / SCALE]} />
+      <meshStandardMaterial color="#0a2c59" transparent opacity={0.7} roughness={0.1} />
     </mesh>
   )
 }
-
 function Forest({ entity }) {
   return (
-    <mesh position={[entity.x / SCALE, 0.5, entity.y / SCALE]} castShadow>
-       <coneGeometry args={[entity.size/(SCALE*2), 1.5, 8]} />
-       <meshStandardMaterial color="#1E5235" roughness={0.8} />
+    <mesh castShadow position={[entity.x / SCALE, 0.7, entity.y / SCALE]}>
+      <coneGeometry args={[entity.size / (SCALE * 1.8), 2, 8]} />
+      <meshStandardMaterial color="#1e5235" roughness={0.8} />
     </mesh>
   )
 }
 
-function World({ envState, identifiedFires }) {
-  if (!envState || !envState.entities) return null;
+// ─────────────────────────────────────────────
+// Left-click command plane (invisible intercept)
+// Only active when a drone is selected.
+// ─────────────────────────────────────────────
+function CommandPlane({ selectedDroneId, onMapCommand, gridOffset }) {
+  const handleClick = useCallback((e) => {
+    e.stopPropagation()
+    if (!selectedDroneId) return
+    const point = e.point
+    // Convert Three.js space → world metres
+    const worldX = (point.x + gridOffset) * SCALE
+    const worldY = (point.z + gridOffset) * SCALE
+    onMapCommand(selectedDroneId, worldX, worldY)
+  }, [selectedDroneId, onMapCommand, gridOffset])
 
-  const centerOffsetX = envState.grid.width / (2 * SCALE)
-  const centerOffsetY = envState.grid.height / (2 * SCALE)
+  // When no drone is selected, don't intercept clicks at all
+  if (!selectedDroneId) return null
 
   return (
-    <group position={[-centerOffsetX, 0, -centerOffsetY]}>
-        {/* World Base Plane */}
-        <mesh rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
-          <planeGeometry args={[envState.grid.width/SCALE, envState.grid.height/SCALE]} />
-          <meshStandardMaterial color="#0b1720" roughness={1} />
-        </mesh>
+    <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.01, 0]} onClick={handleClick}>
+      <planeGeometry args={[2000, 2000]} />
+      <meshBasicMaterial transparent opacity={0} />
+    </mesh>
+  )
+}
 
-        {envState.entities.map(ent => {
-             switch(ent.type) {
-                 case 'factory': return <Factory key={ent.id} entity={ent} />
-                 case 'building': return <Building key={ent.id} entity={ent} />
-                 case 'lake': return <Lake key={ent.id} entity={ent} />
-                 case 'forest': return <Forest key={ent.id} entity={ent} />
-                 default: return null
-             }
-        })}
+// ─────────────────────────────────────────────
+// World — all static entities + CA + home ring
+// ─────────────────────────────────────────────
+function World({ envState, identifiedFires, exploredCells, selectedDroneId, onMapCommand }) {
+  if (!envState) return null
 
-        {envState.fires && envState.fires.map(fire => (
-             <Wildfire key={fire.id} fire={fire} isIdentified={identifiedFires.includes(fire.id)} />
-        ))}
+  const gw = envState.grid?.width  || 100_000
+  const gh = envState.grid?.height || 100_000
+  const ox = gw / (2 * SCALE)
+  const oy = gh / (2 * SCALE)
 
-        {/* Center Target Indicator (Spawn point Home Base) */}
-        <mesh position={[centerOffsetX, 0.05, centerOffsetY]} rotation={[-Math.PI / 2, 0, 0]}>
-          <ringGeometry args={[3, 4, 32]} />
-          <meshBasicMaterial color="#FF4500" transparent opacity={0.5} />
-        </mesh>
+  return (
+    <group position={[-ox, 0, -oy]}>
+      {/* Ground */}
+      <mesh rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
+        <planeGeometry args={[gw / SCALE, gh / SCALE]} />
+        <meshStandardMaterial color="#3d2b1f" roughness={1} />
+      </mesh>
+
+      {/* Static entities */}
+      {(envState.entities || []).map(ent => {
+        switch (ent.type) {
+          case 'factory':  return <Factory  key={ent.id} entity={ent} />
+          case 'building': return <Building key={ent.id} entity={ent} />
+          case 'lake':     return <Lake     key={ent.id} entity={ent} />
+          case 'forest':   return <Forest   key={ent.id} entity={ent} />
+          default: return null
+        }
+      })}
+
+      {/* CA Fire cells */}
+      {(envState.ca_cells || []).map(cell => (
+        <CaCell key={`${cell.i}_${cell.j}`} cell={cell} />
+      ))}
+
+      {/* Explored fog-of-war circles */}
+      <ExploredCircles exploredCells={exploredCells} gridOffset={0} />
+
+      {/* Home Base ring */}
+      <mesh position={[ox, 0.05, oy]} rotation={[-Math.PI / 2, 0, 0]}>
+        <ringGeometry args={[3, 4.5, 48]} />
+        <meshBasicMaterial color="#ff4500" transparent opacity={0.6} />
+      </mesh>
+
+      {/* Left-click command plane — only mounted when a drone is selected */}
+      <CommandPlane selectedDroneId={selectedDroneId} onMapCommand={onMapCommand} gridOffset={ox} />
     </group>
   )
 }
 
+// ─────────────────────────────────────────────
+// Collapsible Map Legend
+// ─────────────────────────────────────────────
+function MapLegend() {
+  const [open, setOpen] = useState(true)
 
-export default function MapGrid({ active, envState, drones, identifiedFires = [] }) {
-  const centerOffset = envState?.grid?.width ? (envState.grid.width / (2 * SCALE)) : 50;
+  const items = [
+    { color: '#1e5235', label: 'Forest',          shape: '▲' },
+    { color: '#0a2c59', label: 'Lake',             shape: '■' },
+    { color: '#2e3b4e', label: 'Building',         shape: '■' },
+    { color: '#4a4a4a', label: 'Factory',          shape: '■' },
+    { color: '#ffcc00', label: 'Early Fire',       shape: '●' },
+    { color: '#ff3300', label: 'Full Fire',        shape: '●' },
+    { color: '#8b1a1a', label: 'Extinguishing',   shape: '●' },
+    { color: '#333333', label: 'Ash',              shape: '■' },
+    { color: '#00ffcc', label: 'Drone / Sensor',  shape: '○' },
+    { color: '#a855f7', label: 'DSP Target',      shape: '◆' },
+    { color: '#00ffcc', label: 'Explored Area',   shape: '○' },
+    { color: '#ff4500', label: 'Home Base',       shape: '○' },
+  ]
+
+  return (
+    <div className="absolute bottom-4 left-4 z-10 select-none">
+      <div className={`bg-card/90 backdrop-blur border border-white/10 rounded-xl shadow-2xl
+        transition-all duration-300 overflow-hidden
+        ${open ? 'w-48 pb-2' : 'w-10 h-10'}`}>
+        <button
+          onClick={() => setOpen(o => !o)}
+          className="flex items-center justify-between w-full px-3 py-2 hover:bg-white/5 rounded-t-xl"
+        >
+          {open && <span className="text-xs font-semibold text-slate-300 tracking-wider uppercase">Legend</span>}
+          <span className={`text-slate-400 transition-transform duration-300 ${open ? '' : 'rotate-180'}`}>
+            {open ? '▼' : '▶'}
+          </span>
+        </button>
+        {open && (
+          <div className="px-3 space-y-1">
+            {items.map(item => (
+              <div key={item.label} className="flex items-center gap-2">
+                <span style={{ color: item.color }} className="text-sm w-4 text-center shrink-0">
+                  {item.shape}
+                </span>
+                <span className="text-xs text-slate-400">{item.label}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────
+// Main export
+// ─────────────────────────────────────────────
+export default function MapGrid({
+  active, envState, drones = {}, identifiedFires = [],
+  selectedDroneId, onDroneSelect, onMapCommand, missionResults
+}) {
+  const gridOffset = envState?.grid?.width ? envState.grid.width / (2 * SCALE) : 100
+
+  // Fog of war: track explored cell keys "x|z" in Three.js space
+  const [exploredCells, setExploredCells] = useState(new Set())
+
+  useEffect(() => {
+    // Clear explored cells on reset
+    if (!envState) {
+      setExploredCells(new Set());
+    }
+  }, [envState]);
+
+  useEffect(() => {
+    if (!active) return
+    const radius = 6000 / SCALE
+    const step   = radius * 1.2
+    setExploredCells(prev => {
+      const next = new Set(prev)
+      Object.values(drones).forEach(d => {
+        const tx = (d.x / SCALE)
+        const tz = (d.y / SCALE)
+        // snap to grid for deduplication
+        const gx = Math.round(tx / step) * step
+        const gz = Math.round(tz / step) * step
+        next.add(`${gx.toFixed(1)}|${gz.toFixed(1)}`)
+      })
+      return next
+    })
+  }, [drones, active])
 
   return (
     <div className="w-full h-full relative">
-      <Canvas shadows camera={{ position: [0, 150, 150], fov: 45 }}>
-        <color attach="background" args={['#05080f']} />
-
+      <Canvas
+        shadows
+        camera={{ position: [0, 100, 120], fov: 45 }}
+        onCreated={({ gl }) => {
+          gl.shadowMap.enabled = true
+          gl.shadowMap.type    = THREE.PCFSoftShadowMap
+        }}
+      >
+        <color attach="background" args={['#1a120b']} />
         <ambientLight intensity={0.2} />
-        <directionalLight position={[200, 300, 100]} intensity={1.5} castShadow shadow-mapSize={[2048, 2048]} shadow-camera-far={400} shadow-camera-left={-200} shadow-camera-right={200} shadow-camera-top={200} shadow-camera-bottom={-200} />
-
+        <directionalLight
+          position={[150, 250, 100]} intensity={1.5} castShadow
+          shadow-mapSize={[2048, 2048]}
+          shadow-camera-far={400}
+          shadow-camera-left={-250} shadow-camera-right={250}
+          shadow-camera-top={250}  shadow-camera-bottom={-250}
+        />
         <Environment preset="night" />
 
-        <World envState={envState} identifiedFires={identifiedFires} />
+        <World
+          envState={envState}
+          identifiedFires={identifiedFires}
+          exploredCells={exploredCells}
+          selectedDroneId={selectedDroneId}
+          onMapCommand={onMapCommand}
+        />
 
-        {/* Drones */}
-        <group position={[-centerOffset, 0, -centerOffset]}>
-          {active && drones && Object.values(drones).map(drone => (
-              <Drone key={drone.drone_id} id={drone.drone_id} pose={drone} color="#00ffcc" />
+        {/* Drones offset to match world centering */}
+        <group position={[-gridOffset, 0, -gridOffset]}>
+          {active && Object.values(drones).map(drone => (
+            <Drone
+              key={drone.drone_id}
+              pose={drone}
+              isSelected={drone.drone_id === selectedDroneId}
+              onSelect={onDroneSelect}
+            />
           ))}
+
+          {/* Mission Result Paths */}
+          {!active && missionResults?.drone_paths &&
+            Object.entries(missionResults.drone_paths).map(([id, path], idx) => (
+              <DronePath
+                key={`path_${id}`}
+                path={path}
+                color={new THREE.Color().setHSL(idx / 10, 0.7, 0.5).getStyle()}
+              />
+            ))
+          }
         </group>
 
+        {/* Disable left-mouse orbit when a drone is selected so left-click
+            reaches the CommandPlane instead of rotating the camera. */}
         <OrbitControls
           enableDamping
           dampingFactor={0.05}
-          maxPolarAngle={Math.PI / 2.1}
-          minDistance={10}
-          maxDistance={400}
+          maxPolarAngle={Math.PI / 2.05}
+          minDistance={5}
+          maxDistance={350}
+          mouseButtons={selectedDroneId
+            ? { MIDDLE: 2, RIGHT: 1 }   // left-button removed
+            : { LEFT: 0, MIDDLE: 2, RIGHT: 1 }}
         />
       </Canvas>
+
+      <MapLegend />
 
       {!active && (
         <div className="absolute inset-0 flex items-center justify-center pointer-events-none bg-dark/40 backdrop-blur-[2px]">
           <div className="px-6 py-3 rounded-full border border-white/10 bg-black/60 text-slate-400 font-mono text-sm tracking-widest shadow-2xl">
             AWAITING DEPLOYMENT
           </div>
+        </div>
+      )}
+
+      {/* Left-click hint when drone selected */}
+      {selectedDroneId && active && (
+        <div className="absolute bottom-4 right-4 px-3 py-2 rounded-lg bg-black/60 border border-purple-500/30 text-purple-300 text-xs font-mono pointer-events-none animate-pulse">
+          🖱 Click map to send drone there
         </div>
       )}
     </div>

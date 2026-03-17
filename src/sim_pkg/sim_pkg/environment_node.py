@@ -5,155 +5,400 @@ import json
 import random
 import math
 
+# ─── World & CA configuration ────────────────────────────────────────────────
+GRID_W_M = 300_000.0
+GRID_H_M = 300_000.0
+CELL_L = 500.0
+GRID_NX = int(GRID_W_M / CELL_L)  # 200
+GRID_NY = int(GRID_H_M / CELL_L)  # 200
+
+UNBURNT = 0
+EARLY_BURN = 1
+FULL_BURN = 2
+EXTINGUISH = 3
+ASH = 4
+
+EARLY_TO_FULL_TIME = 10.0
+EXT_TO_ASH_TIME = 20.0
+SPREAD_BASE_RATE = 0.8
+DT_BASE = 10.0
+REAL_DT = 0.5
+
+BIOME_ANCHORS = [
+    # (center_x, center_y, sigma_m, label, entity_mix)
+    (
+        150_000 - 30_000,
+        150_000 - 30_000,
+        12_000,
+        "north_city",
+        {"building": 15, "factory": 3},
+    ),
+    (
+        150_000 + 25_000,
+        150_000 - 35_000,
+        10_000,
+        "east_town",
+        {"building": 10, "factory": 2},
+    ),
+    (150_000, 150_000 + 30_000, 14_000, "south_suburb", {"building": 9}),
+    (150_000 - 35_000, 150_000 + 15_000, 11_000, "west_village", {"building": 10}),
+    (150_000 + 5_000, 150_000, 8_000, "central_park", {"lake": 2}),
+    (150_000 - 20_000, 150_000 - 15_000, 9_000, "river_delta", {"lake": 3}),
+    (150_000 + 30_000, 150_000 + 20_000, 7_000, "mountain_lake", {"lake": 2}),
+]
+
+N_FOREST_BLOBS = 30  # number of Gaussian forest cluster centres
+FOREST_COVERAGE = 0.7  # target forest fraction of map
+
 
 class EnvironmentNode(Node):
     def __init__(self):
         super().__init__("environment_node")
         self.env_pub = self.create_publisher(String, "environment_state", 10)
-        # 0.5s timestep as requested
-        self.timer = self.create_timer(0.5, self.publish_environment)
+        self.notif_pub = self.create_publisher(String, "drone_notifications", 10)
+        self.timer = self.create_timer(REAL_DT, self.publish_environment)
 
-        # 651.15km x 651.15km grid in meters
-        self.grid_width = 651150.0
-        self.grid_height = 651150.0
-
+        self.grid_width = GRID_W_M
+        self.grid_height = GRID_H_M
         self.season = "Summer"
-        self.wind_speed = 5.0
-        self.wind_direction = 45.0
-        self.base_elevation = 500.0
+        self.wind_speed = 8.0
+        self.wind_dir = 45.0
+        self.base_elev = 500.0
 
-        self.static_entities = self.generate_static_entities()
-        self.fires = []
-        self.max_fires = 20
+        random.seed(42)  # deterministic world layout per run
+        self.static_entities = self._gen_biome_entities()
 
-        self.get_logger().info("Expanded 651km x 651km Environment Node Initialized.")
+        self.get_logger().info(
+            f"Generated {len(self.static_entities)} biome entities "
+            f"({sum(1 for e in self.static_entities if e['type']=='forest')} forests)."
+        )
 
-    def generate_static_entities(self):
+        # Precompute per-cell forest density (done once)
+        self._density_map = self._precompute_density()
+
+        self.cmd_sub = self.create_subscription(
+            String, "swarm_control", self.cmd_callback, 10
+        )
+
+        # CA grid
+        self._reset_ca()
+
+    def _reset_ca(self):
+        self._accum = [[0.0] * GRID_NY for _ in range(GRID_NX)]
+        self._state = [[UNBURNT] * GRID_NY for _ in range(GRID_NX)]
+        self._time_in_st = [[0.0] * GRID_NY for _ in range(GRID_NX)]
+        self._active = set()
+
+        random.seed()  # release fixed seed for stochastic simulation
+        self._seed_fires(count=15)
+
+    def cmd_callback(self, msg):
+        try:
+            cmd = json.loads(msg.data)
+            if cmd.get("action") == "RESET":
+                self.get_logger().info("Resetting environment layout and fires...")
+                # Regenerate entities for a "different map" feel
+                # Note: We use a random seed for layout if we want it to vary,
+                # or keep it fixed if we want same entities but different fires.
+                # User said "generate different maps", so let's vary the seed or just call gen again.
+                # Since random.seed(42) was used in __init__, let's NOT call seed(42) here to get variety.
+                self.static_entities = self._gen_biome_entities()
+                self._density_map = self._precompute_density()
+                self._reset_ca()
+                self.get_logger().info(
+                    f"Environment reset. New entity count: {len(self.static_entities)}"
+                )
+        except Exception as e:
+            self.get_logger().error(f"Error in cmd_callback: {e}")
+
+        self.get_logger().info(
+            f"CA grid {GRID_NX}x{GRID_NY}, "
+            f"{len(self._active)} cells in initial active set."
+        )
+
+    # ------------------------------------------------------------------ #
+    # Gaussian biome entity generation                                     #
+    # ------------------------------------------------------------------ #
+    def _gaussian_point(self, cx, cy, sigma, margin=3_000.0):
+        """Sample a point from a 2-D Gaussian, clamped to world bounds."""
+        x = random.gauss(cx, sigma)
+        y = random.gauss(cy, sigma)
+        x = max(margin, min(GRID_W_M - margin, x))
+        y = max(margin, min(GRID_H_M - margin, y))
+        return x, y
+
+    def _gen_biome_entities(self):
         entities = []
-        # Scaled up quantities for the larger map
-        for _ in range(20):
-            entities.append(
-                {
-                    "id": f"factory_{random.randint(1000, 9999)}",
-                    "type": "factory",
-                    "x": random.uniform(20000, 630000),
-                    "y": random.uniform(20000, 630000),
-                    "size": random.uniform(1000, 3000),
-                }
-            )
 
-        for _ in range(50):
-            entities.append(
-                {
-                    "id": f"building_{random.randint(1000, 9999)}",
-                    "type": "building",
-                    "x": random.uniform(20000, 630000),
-                    "y": random.uniform(20000, 630000),
-                    "size": random.uniform(500, 2000),
-                    "height": random.uniform(50, 300),
-                }
-            )
+        # ── 1. City / town entities (Gaussian around anchor centres) ─────
+        for cx, cy, sigma, label, mix in BIOME_ANCHORS:
+            for etype, count in mix.items():
+                for _ in range(count):
+                    x, y = self._gaussian_point(cx, cy, sigma)
+                    eid = f"{etype}_{random.randint(1000,9999)}"
+                    ent = {"id": eid, "type": etype, "x": x, "y": y}
+                    if etype == "building":
+                        ent["size"] = random.uniform(350, 600)
+                        ent["height"] = random.uniform(20, 120)
+                    elif etype == "factory":
+                        ent["size"] = random.uniform(300, 1000)
+                    elif etype == "lake":
+                        ent["size"] = random.uniform(1_500, 6_000)
+                    entities.append(ent)
 
-        for _ in range(10):
-            entities.append(
-                {
-                    "id": f"lake_{random.randint(1000, 9999)}",
-                    "type": "lake",
-                    "x": random.uniform(50000, 600000),
-                    "y": random.uniform(50000, 600000),
-                    "size": random.uniform(5000, 20000),
-                }
-            )
+        # ── 2. Forest blobs — Gaussian clusters filling 70%+ of the map ─
+        #   Place cluster centres by avoiding city anchors (repulsion heuristic)
+        city_centres = [(cx, cy) for cx, cy, *_ in BIOME_ANCHORS]
 
-        for _ in range(40):
-            entities.append(
-                {
-                    "id": f"forest_{random.randint(1000, 9999)}",
-                    "type": "forest",
-                    "x": random.uniform(20000, 630000),
-                    "y": random.uniform(20000, 630000),
-                    "size": random.uniform(4000, 15000),
-                }
+        forest_centres = []
+        attempts = 0
+        while len(forest_centres) < N_FOREST_BLOBS and attempts < 2000:
+            attempts += 1
+            # Random candidate inside map
+            fx = random.uniform(5_000, GRID_W_M - 5_000)
+            fy = random.uniform(5_000, GRID_H_M - 5_000)
+            # Reject if too close to any city anchor
+            too_close = any(
+                math.hypot(fx - cx, fy - cy) < 12_000 for cx, cy in city_centres
             )
+            if not too_close:
+                forest_centres.append((fx, fy))
+
+        # For 70% coverage: each forest entity covers a roughly circular region.
+        # Tune entity count and size so area sum ≈ 0.70 * world_area.
+        # We use 30 blobs × ~20 entities each, each with radius 2–5 km.
+        for fcx, fcy in forest_centres:
+            blob_sigma = random.uniform(4_000, 10_000)
+            n_trees = random.randint(12, 20)
+            for _ in range(n_trees):
+                x, y = self._gaussian_point(fcx, fcy, blob_sigma)
+                size = random.uniform(4_000, 7_000)
+                entities.append(
+                    {
+                        "id": f"forest_{random.randint(1000,9999)}",
+                        "type": "forest",
+                        "x": x,
+                        "y": y,
+                        "size": size,
+                    }
+                )
 
         return entities
 
-    def get_temperature(self, x, y):
-        base_temp = 25.0
-        for ent in self.static_entities:
-            dist = math.hypot(x - ent["x"], y - ent["y"])
-            if ent["type"] == "lake" and dist < ent["size"] * 2:
-                base_temp -= 5.0 * (1 - dist / (ent["size"] * 2))
-            elif ent["type"] == "factory" and dist < 5000:
-                base_temp += 10.0 * (1 - dist / 5000)
-        return round(base_temp, 2)
+    # ------------------------------------------------------------------ #
+    # Forest density lookup (precomputed)                                  #
+    # ------------------------------------------------------------------ #
+    def _precompute_density(self):
+        forests = [e for e in self.static_entities if e["type"] == "forest"]
+        dm = [[0.0] * GRID_NY for _ in range(GRID_NX)]
+        for i in range(GRID_NX):
+            cx = (i + 0.5) * CELL_L
+            for j in range(GRID_NY):
+                cy = (j + 0.5) * CELL_L
+                d = 0.05
+                for f in forests:
+                    dist = math.hypot(cx - f["x"], cy - f["y"])
+                    if dist < f["size"]:
+                        d += 0.9 * (1.0 - dist / f["size"])
+                dm[i][j] = min(1.0, d)
+        return dm
 
-    def get_forest_density(self, x, y):
-        density = 0.1
-        for ent in self.static_entities:
-            if ent["type"] == "forest":
-                dist = math.hypot(x - ent["x"], y - ent["y"])
-                if dist < ent["size"]:
-                    density += 0.8 * (1 - dist / ent["size"])
-        return round(min(1.0, density), 2)
-
-    def spawn_fire_logic(self):
-        # 1% chance per half-second to spawn a fire, until max_fires is reached
-        if len(self.fires) < self.max_fires and random.random() < 0.01:
-            forests = [e for e in self.static_entities if e["type"] == "forest"]
-            if not forests:
-                return
-
-            target_forest = random.choice(forests)
-
-            # Spawn fire randomly within the radius of the chosen forest
+    # ------------------------------------------------------------------ #
+    # Fire seeding (forest cells only)                                     #
+    # ------------------------------------------------------------------ #
+    def _seed_fires(self, count=3):
+        forests = [e for e in self.static_entities if e["type"] == "forest"]
+        seeded = 0
+        for attempt in range(200):
+            if seeded >= count:
+                break
+            f = random.choice(forests)
             angle = random.uniform(0, 2 * math.pi)
-            radius = random.uniform(0, target_forest["size"])
-            fire_x = target_forest["x"] + radius * math.cos(angle)
-            fire_y = target_forest["y"] + radius * math.sin(angle)
+            radius = random.uniform(0, f["size"] * 0.6)
+            fx = f["x"] + radius * math.cos(angle)
+            fy = f["y"] + radius * math.sin(angle)
+            i = max(0, min(GRID_NX - 1, int(fx / CELL_L)))
+            j = max(0, min(GRID_NY - 1, int(fy / CELL_L)))
+            # Only seed if cell has decent forest density
+            if self._density_map[i][j] > 0.2:
+                self._state[i][j] = FULL_BURN
+                self._active.add((i, j))
+                self._expand_neighbours(i, j)
+                self._publish_fire_notification(f["x"], f["y"])
+                seeded += 1
 
-            self.fires.append(
+    def _expand_neighbours(self, i, j):
+        for di in (-1, 0, 1):
+            for dj in (-1, 0, 1):
+                ni, nj = i + di, j + dj
+                if 0 <= ni < GRID_NX and 0 <= nj < GRID_NY:
+                    self._active.add((ni, nj))
+
+    def _publish_fire_notification(self, x, y):
+        msg = String()
+        msg.data = json.dumps(
+            {
+                "type": "drone_notification",
+                "drone_id": "ENVIRONMENT",
+                "message": f"Wildfire ignited at ({x:.0f},{y:.0f})!",
+            }
+        )
+        self.notif_pub.publish(msg)
+
+    # ------------------------------------------------------------------ #
+    # Adaptive dt per cell                                                 #
+    # ------------------------------------------------------------------ #
+    def _cell_dt(self, i, j):
+        density = self._density_map[i][j]
+        wind_fac = self.wind_speed / 20.0
+        a = wind_fac + density - 0.5
+        dt = DT_BASE / math.exp(a)
+        # We cap dt because it's multiplied by SIM_DT in the step.
+        # But wait, cells have their own internal clocks?
+        # Looking at _step_ca, it uses dt = _cell_dt.
+        # To match drone SIM_DT (10.0), let's ensure the total 'progress' per REAL_DT (0.5s) is DT_BASE.
+        return max(0.05, min(2.0, dt))
+
+    def _spread_speed(self, fi, fj, ti, tj):
+        dx = (ti - fi) * CELL_L
+        dy = (tj - fj) * CELL_L
+        dist = math.hypot(dx, dy)
+        if dist == 0:
+            return 0.0
+        wd_rad = math.radians(self.wind_dir)
+        dot = (dx / dist) * math.cos(wd_rad) + (dy / dist) * math.sin(wd_rad)
+        density = self._density_map[fi][fj]
+        R = SPREAD_BASE_RATE * (1.0 + 0.5 * dot) * (0.5 + density)
+        # Higher density = faster spread
+        return max(0.0, R)
+
+    # ------------------------------------------------------------------ #
+    # CA step                                                              #
+    # ------------------------------------------------------------------ #
+    def _step_ca(self):
+        new_state = [row[:] for row in self._state]
+        new_accum = [row[:] for row in self._accum]
+        new_time = [row[:] for row in self._time_in_st]
+        next_active = set()
+
+        for i, j in self._active:
+            st = self._state[i][j]
+            dt = self._cell_dt(i, j)
+
+            if st == UNBURNT:
+                # Only spread to cells with some forest density
+                if self._density_map[i][j] < 0.1:
+                    continue  # bare ground — fire won't spread here
+                sum_R = 0.0
+                for di in (-1, 0, 1):
+                    for dj in (-1, 0, 1):
+                        if di == dj == 0:
+                            continue
+                        ni, nj = i + di, j + dj
+                        if 0 <= ni < GRID_NX and 0 <= nj < GRID_NY:
+                            if self._state[ni][nj] == FULL_BURN:
+                                sum_R = sum_R + self._spread_speed(ni, nj, i, j)
+                incoming = (sum_R / CELL_L) * dt
+                new_accum[i][j] += incoming
+                if new_accum[i][j] >= 1.0:
+                    new_state[i][j] = EARLY_BURN
+                    new_time[i][j] = 0.0
+                    next_active.add((i, j))
+                    self._expand_neighbours(i, j)
+                    self._publish_fire_notification(
+                        (i + 0.5) * CELL_L, (j + 0.5) * CELL_L
+                    )
+                elif new_accum[i][j] > 0.0:
+                    next_active.add((i, j))
+
+            elif st == EARLY_BURN:
+                new_time[i][j] += dt
+                if new_time[i][j] >= EARLY_TO_FULL_TIME:
+                    new_state[i][j] = FULL_BURN
+                    new_time[i][j] = 0.0
+                    self._expand_neighbours(i, j)
+                next_active.add((i, j))
+
+            elif st == FULL_BURN:
+                new_time[i][j] += dt
+                all_burning = True
+                for di in (-1, 0, 1):
+                    for dj in (-1, 0, 1):
+                        if di == dj == 0:
+                            continue
+                        ni, nj = i + di, j + dj
+                        if 0 <= ni < GRID_NX and 0 <= nj < GRID_NY:
+                            if self._state[ni][nj] < FULL_BURN:
+                                all_burning = False
+                                break
+                    if not all_burning:
+                        break
+                if all_burning and new_time[i][j] >= 5.0:
+                    new_state[i][j] = EXTINGUISH
+                    new_time[i][j] = 0.0
+                next_active.add((i, j))
+
+            elif st == EXTINGUISH:
+                new_time[i][j] += dt
+                if new_time[i][j] >= EXT_TO_ASH_TIME:
+                    new_state[i][j] = ASH
+                else:
+                    next_active.add((i, j))
+            # ASH — terminal, not re-added
+
+        self._state = new_state
+        self._accum = new_accum
+        self._time_in_st = new_time
+        self._active = next_active
+
+    # ------------------------------------------------------------------ #
+    # Payload                                                              #
+    # ------------------------------------------------------------------ #
+    def _ca_payload(self):
+        cells = []
+        for i, j in self._active:
+            st = self._state[i][j]
+            if st == UNBURNT:
+                continue
+            cells.append(
                 {
-                    "id": f"fire_{str(random.randint(1000,9999))}",
-                    "x": fire_x,
-                    "y": fire_y,
-                    "size": random.uniform(500, 2000),
-                    "identified": False,  # Tracked by drones later
+                    "i": i,
+                    "j": j,
+                    "x": (i + 0.5) * CELL_L,
+                    "y": (j + 0.5) * CELL_L,
+                    "state": st,
                 }
             )
-            self.get_logger().info(
-                f"New wildfire spawned at ({fire_x:.0f}, {fire_y:.0f}) inside {target_forest['id']}"
-            )
+        return cells
 
-    def update_environment(self):
-        self.wind_speed += random.uniform(-0.5, 0.5)
-        self.wind_speed = max(0.0, self.wind_speed)
-        self.wind_direction = (self.wind_direction + random.uniform(-5.0, 5.0)) % 360
-
-        self.spawn_fire_logic()
+    # ------------------------------------------------------------------ #
+    # Publish                                                              #
+    # ------------------------------------------------------------------ #
+    def _update_env(self):
+        self.wind_speed += random.uniform(-0.3, 0.3)
+        self.wind_speed = max(0.5, min(20.0, self.wind_speed))
+        self.wind_dir = (self.wind_dir + random.uniform(-5.0, 5.0)) % 360
+        self._step_ca()
 
     def publish_environment(self):
-        self.update_environment()
-
-        center_temp = self.get_temperature(self.grid_width / 2, self.grid_height / 2)
-        center_density = self.get_forest_density(
-            self.grid_width / 2, self.grid_height / 2
-        )
-
+        self._update_env()
         env_state = {
-            "grid": {"width": self.grid_width, "height": self.grid_height},
+            "grid": {
+                "width": self.grid_width,
+                "height": self.grid_height,
+                "cell_size": CELL_L,
+                "nx": GRID_NX,
+                "ny": GRID_NY,
+            },
             "season": self.season,
-            "global_temperature": center_temp,
-            "global_canopy_density": center_density,
             "wind": {
                 "speed": round(self.wind_speed, 2),
-                "direction": round(self.wind_direction, 2),
+                "direction": round(self.wind_dir, 2),
             },
-            "topography": {"base_elevation": self.base_elevation},
+            "topography": {"base_elevation": self.base_elev},
             "entities": self.static_entities,
-            "fires": self.fires,
+            "ca_cells": self._ca_payload(),
         }
-
         msg = String()
         msg.data = json.dumps(env_state)
         self.env_pub.publish(msg)
@@ -165,9 +410,7 @@ def main(args=None):
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
-        node.get_logger().info("Environment Node stopped cleanly.")
-    except Exception as e:
-        node.get_logger().error(f"Error in Environment Node: {e}")
+        node.get_logger().info("EnvironmentNode stopped.")
     finally:
         node.destroy_node()
         rclpy.shutdown()

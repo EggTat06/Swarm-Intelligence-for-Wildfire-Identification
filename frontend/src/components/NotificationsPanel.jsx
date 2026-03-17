@@ -1,58 +1,84 @@
 import { AlertTriangle, Info, Flame } from 'lucide-react'
 
-const MOCK_NOTIFICATIONS = [
-  { id: 1, type: 'critical', time: '14:02:45', msg: 'YOLOv8 CONFIRMED FIRE: Drone-7x2', coords: '45.122, -112.451' },
-  { id: 2, type: 'info', time: '14:00:12', msg: 'Drone-7x2 altered heading (DSP)', coords: null },
-  { id: 3, type: 'warning', time: '13:58:33', msg: 'Heat signature detected. Verifying...', coords: '45.120, -112.449' },
-  { id: 4, type: 'info', time: '13:55:00', msg: 'Swarm deployment initialized', coords: null },
-]
+// ── Malaysia timezone formatter ──────────────────────────────────────────────
+const MYT_OPTIONS = {
+  timeZone: 'Asia/Kuala_Lumpur',
+  hour12: false,
+  hour:   '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+}
+export const toMYT = (date = new Date()) =>
+  date.toLocaleTimeString('en-MY', MYT_OPTIONS)
 
-export default function NotificationsPanel({ active }) {
-  if (!active) {
+// ── Notification type metadata ───────────────────────────────────────────────
+const TYPE_META = {
+  critical: {
+    bg:   'bg-red-500/10 border-red-500/30 shadow-[0_0_8px_rgba(239,68,68,0.15)]',
+    text: 'text-red-100',
+    icon: <Flame className="w-4 h-4 text-red-400 animate-pulse shrink-0" />,
+  },
+  warning: {
+    bg:   'bg-amber-500/10 border-amber-500/30',
+    text: 'text-amber-100',
+    icon: <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />,
+  },
+  info: {
+    bg:   'bg-slate-800/50 border-white/5',
+    text: 'text-slate-200',
+    icon: <Info className="w-4 h-4 text-emerald-400 shrink-0" />,
+  },
+}
+
+export default function NotificationsPanel({ active, notifications = [] }) {
+  if (!active || notifications.length === 0) {
     return (
-      <div className="flex-1 flex flex-col items-center justify-center text-slate-600 border border-white/5 rounded-xl bg-black/20">
-        <span className="font-mono text-xs uppercase tracking-widest">Logs Empty</span>
+      <div className="flex-1 flex flex-col items-center justify-center text-slate-600 border border-white/5 rounded-xl bg-black/20 h-full">
+        <span className="font-mono text-xs uppercase tracking-widest">
+          {active ? 'No alerts yet' : 'Deploy swarm to begin'}
+        </span>
       </div>
     )
   }
 
   return (
-    <div className="flex-1 overflow-y-auto space-y-3 pr-2 custom-scrollbar">
-      {MOCK_NOTIFICATIONS.map((notif) => (
-        <div
-          key={notif.id}
-          className={`p-3 rounded-lg border ${
-            notif.type === 'critical' ? 'bg-red-500/10 border-red-500/30 shadow-[0_0_10px_rgba(239,68,68,0.1)]' :
-            notif.type === 'warning' ? 'bg-amber-500/10 border-amber-500/30' :
-            'bg-slate-800/50 border-white/5'
-          } hover:bg-slate-800 transition-colors group cursor-default`}
-        >
-          <div className="flex gap-3">
-            <div className="mt-0.5">
-              {notif.type === 'critical' && <Flame className="w-4 h-4 text-red-500 animate-pulse" />}
-              {notif.type === 'warning' && <AlertTriangle className="w-4 h-4 text-amber-500" />}
-              {notif.type === 'info' && <Info className="w-4 h-4 text-emerald-500" />}
-            </div>
-            <div className="flex-1">
-              <div className="flex justify-between items-start">
-                <span className={`text-sm font-medium ${
-                  notif.type === 'critical' ? 'text-red-100' : 'text-slate-200'
-                }`}>
-                  {notif.msg}
-                </span>
-                <span className="text-[10px] text-slate-500 font-mono tracking-wider ml-2 whitespace-nowrap">
-                  {notif.time}
-                </span>
-              </div>
-              {notif.coords && (
-                <div className="mt-1 text-xs text-slate-400 font-mono">
-                  LOC: {notif.coords}
+    <div className="flex-1 overflow-y-auto space-y-2 pr-1 h-full
+      [scrollbar-width:thin] [scrollbar-color:rgba(255,255,255,0.1)_transparent]
+      hover:[scrollbar-color:rgba(255,255,255,0.2)_transparent]">
+      {notifications.map((notif, index) => {
+        const meta = TYPE_META[notif.type] || TYPE_META.info
+        return (
+          <div
+            key={notif.id ?? index}
+            className={`p-3 rounded-lg border transition-colors ${meta.bg} hover:brightness-110`}
+          >
+            <div className="flex gap-2 items-start">
+              <div className="mt-0.5">{meta.icon}</div>
+              <div className="flex-1 min-w-0">
+                <div className="flex justify-between items-start gap-2">
+                  <span className={`text-sm font-medium leading-snug ${meta.text}`}>
+                    {notif.msg}
+                  </span>
+                  {/* Timestamp in Malaysia Time */}
+                  <span className="text-[10px] text-slate-500 font-mono tracking-wider whitespace-nowrap shrink-0">
+                    {notif.time}
+                  </span>
                 </div>
-              )}
+                {notif.drone_id && notif.drone_id !== 'ENVIRONMENT' && (
+                  <span className="mt-0.5 text-[10px] text-slate-500 font-mono block">
+                    {notif.drone_id}
+                  </span>
+                )}
+                {notif.coords && (
+                  <span className="mt-0.5 text-[10px] text-slate-500 font-mono block">
+                    📍 {notif.coords}
+                  </span>
+                )}
+              </div>
             </div>
           </div>
-        </div>
-      ))}
+        )
+      })}
     </div>
   )
 }
