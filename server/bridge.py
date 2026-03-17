@@ -123,8 +123,8 @@ class FastAPIBridgeNode(Node):
 
             cur.execute(
                 """
-                INSERT INTO missions (mission_id, start_time, end_time, swarm_parameters, time_to_first_detection, success)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                INSERT INTO missions (mission_id, start_time, end_time, swarm_parameters, time_to_first_detection, success, drone_paths)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     mission_id,
@@ -138,6 +138,7 @@ class FastAPIBridgeNode(Node):
                     ),
                     report["first_detection_seconds"],
                     report["fires_identified"] > 0,
+                    json.dumps(report.get("drone_paths", {})),
                 ),
             )
 
@@ -200,10 +201,11 @@ async def websocket_endpoint(websocket: WebSocket):
 
             try:
                 cmd = json.loads(data)
-                # Handle RESET type from UI if needed, currently UI sends swarm_control directly
-                if (
-                    cmd.get("type") == "swarm_control" or cmd.get("action") == "RESET"
-                ) and ros_node:
+                # Forward any command-like message to ROS
+                is_command = cmd.get("type") in ["swarm_control", "command"] or cmd.get(
+                    "action"
+                ) in ["RESET", "DEPLOY", "ABORT"]
+                if is_command and ros_node:
                     ros_node.publish_command(json.dumps(cmd))
             except Exception as e:
                 print(f"Error parsing command from UI: {e}")

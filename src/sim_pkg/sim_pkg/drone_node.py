@@ -35,7 +35,6 @@ class SwarmManagerNode(Node):
         self.discovered_fires = set()
         self.mission_start_time = None
         self.first_detection_time = None
-        self.drone_paths = {}  # Each entry: drone_id -> list of (x, y)
         self.visited_cells = set()  # Unique cells visited by any drone
         self.is_returning_home = False
 
@@ -99,6 +98,8 @@ class SwarmManagerNode(Node):
             # Commanded state
             "commanded_target_x": None,
             "commanded_target_y": None,
+            # Breadcrumb path tracking
+            "path": [[self.home_x, self.home_y]],
         }
         self.get_logger().info(
             f"+ {drone_id} (v={v:.1f}m/s) dsp=({init_dsp_x:.0f},{init_dsp_y:.0f})"
@@ -128,7 +129,7 @@ class SwarmManagerNode(Node):
     def cmd_callback(self, msg):
         try:
             cmd = json.loads(msg.data)
-            action = cmd.get("action", "")
+            action = cmd.get("action") or cmd.get("command") or ""
 
             if action == "add":
                 self.add_drone()
@@ -156,16 +157,22 @@ class SwarmManagerNode(Node):
                 if self.mission_start_time is None:
                     self.mission_start_time = self.get_clock().now()
                     self.is_returning_home = False
-                    self.get_logger().info("Mission Start Time Toggled.")
+                    for d in self.drones.values():
+                        d["path"] = [[d["x"], d["y"]]]
+                    self.visited_cells = set()
+                    self.discovered_fires = set()
+                    self.first_detection_time = None
+                    self.get_logger().info("Mission Start. Paths and metrics cleared.")
 
             elif action == "ABORT":
-                self.get_logger().info(
-                    "Abort requested. Reporting immediately and returning to base."
-                )
-                self._generate_mission_report()
-                self.is_returning_home = True
-                for d in self.drones.values():
-                    d["state"] = "RETURNING_HOME"
+                if self.mission_start_time is not None:
+                    self.get_logger().info(
+                        "Abort requested. Reporting immediately and returning to base."
+                    )
+                    self._generate_mission_report()
+                    self.is_returning_home = True
+                    for d in self.drones.values():
+                        d["state"] = "RETURNING_HOME"
 
             elif action == "RESET":
                 self.get_logger().info(
@@ -174,12 +181,10 @@ class SwarmManagerNode(Node):
                 self.mission_start_time = None
                 self.first_detection_time = None
                 self.is_returning_home = False
-                self.discovered_fires = set()
-                self.drone_paths = {}
-                self.visited_cells = set()
                 for d in self.drones.values():
                     d["x"] = self.home_x
                     d["y"] = self.home_y
+                    d["path"] = [[self.home_x, self.home_y]]
                     d["battery"] = 100.0
                     d["state"] = "TRACKING_DSP"
                     # Reset DSP points too
@@ -213,7 +218,7 @@ class SwarmManagerNode(Node):
             "drones_deployed": len(self.drones),
             "fires_identified": len(self.discovered_fires),
             "area_coverage_pct": round(coverage_pct, 2),
-            "drone_paths": self.drone_paths,
+            "drone_paths": {d_id: d["path"] for d_id, d in self.drones.items()},
         }
 
         msg = String()
@@ -364,6 +369,17 @@ class SwarmManagerNode(Node):
             drone["target_heading"] = math.atan2(
                 self.home_y - drone["y"], self.home_x - drone["x"]
             )
+            dist_to_home = math.hypot(
+                self.home_x - drone["x"], self.home_y - drone["y"]
+            )
+            if dist_to_home <= 500.0:
+                drone["state"] = "LANDED"
+                drone["x"] = self.home_x
+                drone["y"] = self.home_y
+                self.get_logger().info(f"{drone['id']} has LANDED at base.")
+
+        elif state == "LANDED":
+            pass
 
         # ── Heading PID (real dt for angular rate) ────────────────────────
         angle_diff = (drone["target_heading"] - drone["heading"] + math.pi) % (
@@ -373,35 +389,29 @@ class SwarmManagerNode(Node):
         drone["heading"] = (drone["heading"] + omega * REAL_DT) % (2 * math.pi)
 
         # ── Position update (scaled by SIM_DT) ────────────────────────────
-        drone["x"] = max(
-            0.0, min(gw, drone["x"] + drone["v"] * math.cos(drone["heading"]) * SIM_DT)
-        )
-        drone["y"] = max(
-            0.0, min(gh, drone["y"] + drone["v"] * math.sin(drone["heading"]) * SIM_DT)
-        )
+        if state != "LANDED" and (
+            self.mission_start_time is not None or self.is_returning_home
+        ):
+            drone["x"] = max(
+                0.0,
+                min(gw, drone["x"] + drone["v"] * math.cos(drone["heading"]) * SIM_DT),
+            )
+            drone["y"] = max(
+                0.0,
+                min(gh, drone["y"] + drone["v"] * math.sin(drone["heading"]) * SIM_DT),
+            )
+
+        # Append to path if moved > 50m
+        last_p = drone["path"][-1]
+        if math.hypot(drone["x"] - last_p[0], drone["y"] - last_p[1]) > 50.0:
+            drone["path"].append([round(drone["x"], 1), round(drone["y"], 1)])
+            # Keep path length reasonable if needed, but for now we follow user instructions
 
         # Battery drain ∝ sim time
         drone["battery"] -= 0.001 * SIM_DT
 
         # Track path and visited cells
         if self.mission_start_time:
-            d_id = drone["id"]
-            if d_id not in self.drone_paths:
-                self.drone_paths[d_id] = []
-
-            # Subsample path to avoid massive JSON blobs
-            if (
-                len(self.drone_paths[d_id]) == 0
-                or math.hypot(
-                    drone["x"] - self.drone_paths[d_id][-1][0],
-                    drone["y"] - self.drone_paths[d_id][-1][1],
-                )
-                > 1000.0
-            ):
-                self.drone_paths[d_id].append(
-                    (round(drone["x"], 1), round(drone["y"], 1))
-                )
-
             # Track unique 500m cells
             cell_i = int(drone["x"] / 500)
             cell_j = int(drone["y"] / 500)
@@ -470,6 +480,7 @@ class SwarmManagerNode(Node):
                     "state": d["state"],
                     "dsp_x": d["dsp_x"],
                     "dsp_y": d["dsp_y"],
+                    "path": d["path"],
                 }
             )
 
@@ -487,8 +498,7 @@ class SwarmManagerNode(Node):
         if self.is_returning_home:
             all_home = True
             for d in self.drones.values():
-                dist = math.hypot(d["x"] - self.home_x, d["y"] - self.home_y)
-                if dist > 200.0:  # 200m threshold
+                if d["state"] != "LANDED":
                     all_home = False
                     break
 

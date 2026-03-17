@@ -87,9 +87,9 @@ function DronePath({ path, color }) {
 // ─────────────────────────────────────────────
 function Drone({ pose, isSelected, onSelect }) {
   const groupRef = useRef()
-  const dspRef   = useRef()
+  const dspRef = useRef()
   const targetPos = useRef(new THREE.Vector3(pose.x / SCALE, (pose.alt || 90) / 30, pose.y / SCALE))
-  const dspPos    = useRef(new THREE.Vector3((pose.dsp_x ?? pose.x) / SCALE, 1.5, (pose.dsp_y ?? pose.y) / SCALE))
+  const dspPos = useRef(new THREE.Vector3((pose.dsp_x ?? pose.x) / SCALE, 1.5, (pose.dsp_y ?? pose.y) / SCALE))
 
   useEffect(() => {
     targetPos.current.set(pose.x / SCALE, (pose.alt || 90) / 30, pose.y / SCALE)
@@ -227,26 +227,26 @@ function CommandPlane({ selectedDroneId, onMapCommand, gridOffset }) {
 function World({ envState, identifiedFires, exploredCells, selectedDroneId, onMapCommand }) {
   if (!envState) return null
 
-  const gw = envState.grid?.width  || 100_000
+  const gw = envState.grid?.width || 100_000
   const gh = envState.grid?.height || 100_000
   const ox = gw / (2 * SCALE)
   const oy = gh / (2 * SCALE)
 
   return (
     <group position={[-ox, 0, -oy]}>
-      {/* Ground */}
-      <mesh rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
+      {/* Ground - centered at (ox, oy) to cover range [0, gw] */}
+      <mesh rotation={[-Math.PI / 2, 0, 0]} receiveShadow position={[ox, 0.0, oy]}>
         <planeGeometry args={[gw / SCALE, gh / SCALE]} />
-        <meshStandardMaterial color="#3d2b1f" roughness={1} />
+        <meshStandardMaterial color="#5a3a24ff" roughness={1} />
       </mesh>
 
       {/* Static entities */}
       {(envState.entities || []).map(ent => {
         switch (ent.type) {
-          case 'factory':  return <Factory  key={ent.id} entity={ent} />
+          case 'factory': return <Factory key={ent.id} entity={ent} />
           case 'building': return <Building key={ent.id} entity={ent} />
-          case 'lake':     return <Lake     key={ent.id} entity={ent} />
-          case 'forest':   return <Forest   key={ent.id} entity={ent} />
+          case 'lake': return <Lake key={ent.id} entity={ent} />
+          case 'forest': return <Forest key={ent.id} entity={ent} />
           default: return null
         }
       })}
@@ -278,18 +278,18 @@ function MapLegend() {
   const [open, setOpen] = useState(true)
 
   const items = [
-    { color: '#1e5235', label: 'Forest',          shape: '▲' },
-    { color: '#0a2c59', label: 'Lake',             shape: '■' },
-    { color: '#2e3b4e', label: 'Building',         shape: '■' },
-    { color: '#4a4a4a', label: 'Factory',          shape: '■' },
-    { color: '#ffcc00', label: 'Early Fire',       shape: '●' },
-    { color: '#ff3300', label: 'Full Fire',        shape: '●' },
-    { color: '#8b1a1a', label: 'Extinguishing',   shape: '●' },
-    { color: '#333333', label: 'Ash',              shape: '■' },
-    { color: '#00ffcc', label: 'Drone / Sensor',  shape: '○' },
-    { color: '#a855f7', label: 'DSP Target',      shape: '◆' },
-    { color: '#00ffcc', label: 'Explored Area',   shape: '○' },
-    { color: '#ff4500', label: 'Home Base',       shape: '○' },
+    { color: '#1e5235', label: 'Forest', shape: '▲' },
+    { color: '#0a2c59', label: 'Lake', shape: '■' },
+    { color: '#2e3b4e', label: 'Building', shape: '■' },
+    { color: '#4a4a4a', label: 'Factory', shape: '■' },
+    { color: '#ffcc00', label: 'Early Fire', shape: '●' },
+    { color: '#ff3300', label: 'Full Fire', shape: '●' },
+    { color: '#8b1a1a', label: 'Extinguishing', shape: '●' },
+    { color: '#333333', label: 'Ash', shape: '■' },
+    { color: '#00ffcc', label: 'Drone / Sensor', shape: '○' },
+    { color: '#a855f7', label: 'DSP Target', shape: '◆' },
+    { color: '#00ffcc', label: 'Explored Area', shape: '○' },
+    { color: '#ff4500', label: 'Home Base', shape: '○' },
   ]
 
   return (
@@ -345,7 +345,7 @@ export default function MapGrid({
   useEffect(() => {
     if (!active) return
     const radius = 6000 / SCALE
-    const step   = radius * 1.2
+    const step = radius * 1.2
     setExploredCells(prev => {
       const next = new Set(prev)
       Object.values(drones).forEach(d => {
@@ -367,18 +367,18 @@ export default function MapGrid({
         camera={{ position: [0, 100, 120], fov: 45 }}
         onCreated={({ gl }) => {
           gl.shadowMap.enabled = true
-          gl.shadowMap.type    = THREE.PCFSoftShadowMap
+          gl.shadowMap.type = THREE.PCFSoftShadowMap
         }}
       >
-        <color attach="background" args={['#1a120b']} />
+        <color attach="background" args={['#5a3a24ff']} />
         <ambientLight intensity={0.2} />
-        <directionalLight
+        {/* <directionalLight
           position={[150, 250, 100]} intensity={1.5} castShadow
           shadow-mapSize={[2048, 2048]}
           shadow-camera-far={400}
           shadow-camera-left={-250} shadow-camera-right={250}
-          shadow-camera-top={250}  shadow-camera-bottom={-250}
-        />
+          shadow-camera-top={250} shadow-camera-bottom={-250}
+        /> */}
         <Environment preset="night" />
 
         <World
@@ -398,6 +398,17 @@ export default function MapGrid({
               isSelected={drone.drone_id === selectedDroneId}
               onSelect={onDroneSelect}
             />
+          ))}
+
+          {/* Live Progress Paths */}
+          {active && Object.values(drones).map((drone, idx) => (
+            drone.path && (
+              <DronePath
+                key={`live_path_${drone.drone_id}`}
+                path={drone.path}
+                color={new THREE.Color().setHSL(idx / 10, 0.7, 0.5).getStyle()}
+              />
+            )
           ))}
 
           {/* Mission Result Paths */}

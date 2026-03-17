@@ -23,6 +23,7 @@ EXT_TO_ASH_TIME = 20.0
 SPREAD_BASE_RATE = 0.8
 DT_BASE = 10.0
 REAL_DT = 0.5
+SIM_DT = 10.0  # Must match drone_node.py
 
 BIOME_ANCHORS = [
     # (center_x, center_y, sigma_m, label, entity_mix)
@@ -105,6 +106,7 @@ class EnvironmentNode(Node):
                 self.static_entities = self._gen_biome_entities()
                 self._density_map = self._precompute_density()
                 self._reset_ca()
+                self.publish_environment()
                 self.get_logger().info(
                     f"Environment reset. New entity count: {len(self.static_entities)}"
                 )
@@ -248,16 +250,14 @@ class EnvironmentNode(Node):
     # ------------------------------------------------------------------ #
     # Adaptive dt per cell                                                 #
     # ------------------------------------------------------------------ #
+    # Adaptive dt per cell (simulation seconds per tick)
     def _cell_dt(self, i, j):
         density = self._density_map[i][j]
         wind_fac = self.wind_speed / 20.0
         a = wind_fac + density - 0.5
-        dt = DT_BASE / math.exp(a)
-        # We cap dt because it's multiplied by SIM_DT in the step.
-        # But wait, cells have their own internal clocks?
-        # Looking at _step_ca, it uses dt = _cell_dt.
-        # To match drone SIM_DT (10.0), let's ensure the total 'progress' per REAL_DT (0.5s) is DT_BASE.
-        return max(0.05, min(2.0, dt))
+        # Base progression is SIM_DT (10s per tick).
+        # We scale it slightly by weather/density.
+        return SIM_DT * math.exp(a * 0.5)
 
     def _spread_speed(self, fi, fj, ti, tj):
         dx = (ti - fi) * CELL_L
@@ -296,10 +296,13 @@ class EnvironmentNode(Node):
                             continue
                         ni, nj = i + di, j + dj
                         if 0 <= ni < GRID_NX and 0 <= nj < GRID_NY:
-                            if self._state[ni][nj] == FULL_BURN:
-                                sum_R = sum_R + self._spread_speed(ni, nj, i, j)
+                            # allow heat from EARLY_BURN too
+                            if self._state[ni][nj] in (EARLY_BURN, FULL_BURN):
+                                sum_R += self._spread_speed(ni, nj, i, j)
+
                 incoming = (sum_R / CELL_L) * dt
                 new_accum[i][j] += incoming
+
                 if new_accum[i][j] >= 1.0:
                     new_state[i][j] = EARLY_BURN
                     new_time[i][j] = 0.0
@@ -308,7 +311,8 @@ class EnvironmentNode(Node):
                     self._publish_fire_notification(
                         (i + 0.5) * CELL_L, (j + 0.5) * CELL_L
                     )
-                elif new_accum[i][j] > 0.0:
+                # cells stay in next_active if near a fire or accumulating heat
+                elif sum_R > 0.0 or new_accum[i][j] > 0.0:
                     next_active.add((i, j))
 
             elif st == EARLY_BURN:
@@ -321,21 +325,21 @@ class EnvironmentNode(Node):
 
             elif st == FULL_BURN:
                 new_time[i][j] += dt
-                all_burning = True
+                # loop through neighbors and add UNBURNT to next_active
                 for di in (-1, 0, 1):
                     for dj in (-1, 0, 1):
                         if di == dj == 0:
                             continue
                         ni, nj = i + di, j + dj
                         if 0 <= ni < GRID_NX and 0 <= nj < GRID_NY:
-                            if self._state[ni][nj] < FULL_BURN:
-                                all_burning = False
-                                break
-                    if not all_burning:
-                        break
-                if all_burning and new_time[i][j] >= 5.0:
+                            if self._state[ni][nj] == UNBURNT:
+                                next_active.add((ni, nj))
+
+                # Transition to EXTINGUISH when new_time[i][j] >= 15.0
+                if new_time[i][j] >= 15.0:
                     new_state[i][j] = EXTINGUISH
                     new_time[i][j] = 0.0
+
                 next_active.add((i, j))
 
             elif st == EXTINGUISH:

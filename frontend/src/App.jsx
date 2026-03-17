@@ -89,12 +89,16 @@ function App() {
   }, []);
 
   const handleToggleMission = () => {
-    const next = !missionActive;
-    setMissionActive(next);
-    wsSend({ type: 'command', command: next ? 'DEPLOY' : 'ABORT' });
-    addNotif('info',
-      next ? 'Swarm deployed. 10 UAVs initializing from base.' : 'Mission aborted. Drones returning to base.'
-    );
+    if (missionActive) {
+      // abort pulse
+      wsSend({ type: 'command', command: 'ABORT' });
+      addNotif('info', 'Mission aborted. Drones returning to base. Map will close once all drones home.');
+    } else {
+      // deploy
+      setMissionActive(true);
+      wsSend({ type: 'command', command: 'DEPLOY' });
+      addNotif('info', 'Swarm deployed. 10 UAVs initializing from base.');
+    }
   };
 
   const handleSwarmControl = (action) => {
@@ -150,7 +154,7 @@ function App() {
       duration: (new Date(m.end_time) - new Date(m.start_time)) / 1000,
       first_detection_seconds: m.time_to_first_detection,
       drones_deployed: m.swarm_parameters?.drones || 0,
-      drone_paths: m.drone_paths
+      drone_paths: m.drone_paths,
     };
     setMissionResults(results);
     setShowHistory(false);
