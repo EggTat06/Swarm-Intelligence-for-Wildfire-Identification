@@ -147,6 +147,58 @@ function Drone({ pose, isSelected, onSelect }) {
           )}
         </group>
       )}
+
+      {/* Commanded Target indicator */}
+      {(pose.state === 'COMMANDED' || pose.state === 'COMMANDED_WALK') && pose.commanded_target_x != null && (
+        <group position={[pose.commanded_target_x / SCALE, 0.5, pose.commanded_target_y / SCALE]}>
+          <group ref={(ref) => {
+            if (ref) {
+
+            }
+          }} />
+          <CommandArrow targetX={pose.commanded_target_x} targetY={pose.commanded_target_y} />
+        </group>
+      )}
+    </group>
+  )
+}
+
+// ─────────────────────────────────────────────
+// Commanded Target Arrow
+// ─────────────────────────────────────────────
+function CommandArrow({ targetX, targetY }) {
+  const ref = useRef()
+  useFrame(({ clock }) => {
+    if (ref.current) {
+      ref.current.rotation.y = clock.getElapsedTime() * 4.0
+    }
+  })
+
+  return (
+    <group ref={ref}>
+      {/* Square outline reticle */}
+      <mesh rotation={[-Math.PI / 2, 0, 0]}>
+        <ringGeometry args={[2.5, 3.5, 4, 1]} />
+        <meshBasicMaterial color="#ff0044" transparent opacity={0.9} side={THREE.DoubleSide} />
+      </mesh>
+      {/* 4 inward-pointing triangles */}
+      <mesh position={[0, 0, -3.5]} rotation={[-Math.PI / 2, 0, 0]}>
+        <coneGeometry args={[1.5, 3, 3]} />
+        <meshBasicMaterial color="#ff0044" />
+      </mesh>
+      <mesh position={[0, 0, 3.5]} rotation={[-Math.PI / 2, 0, Math.PI]}>
+        <coneGeometry args={[1.5, 3, 3]} />
+        <meshBasicMaterial color="#ff0044" />
+      </mesh>
+      <mesh position={[3.5, 0, 0]} rotation={[-Math.PI / 2, 0, -Math.PI / 2]}>
+        <coneGeometry args={[1.5, 3, 3]} />
+        <meshBasicMaterial color="#ff0044" />
+      </mesh>
+      <mesh position={[-3.5, 0, 0]} rotation={[-Math.PI / 2, 0, Math.PI / 2]}>
+        <coneGeometry args={[1.5, 3, 3]} />
+        <meshBasicMaterial color="#ff0044" />
+      </mesh>
+      <pointLight color="#ff0044" intensity={2} distance={20} position={[0, 2, 0]} />
     </group>
   )
 }
@@ -182,7 +234,7 @@ function Lake({ entity }) {
   return (
     <mesh position={[entity.x / SCALE, 0.05, entity.y / SCALE]} rotation={[-Math.PI / 2, 0, 0]}>
       <planeGeometry args={[entity.size / SCALE, entity.size / SCALE]} />
-      <meshStandardMaterial color="#0a2c59" transparent opacity={0.7} roughness={0.1} />
+      <meshStandardMaterial color="#0255adff" transparent opacity={0.7} roughness={0.1} />
     </mesh>
   )
 }
@@ -237,7 +289,7 @@ function World({ envState, identifiedFires, exploredCells, selectedDroneId, onMa
       {/* Ground - centered at (ox, oy) to cover range [0, gw] */}
       <mesh rotation={[-Math.PI / 2, 0, 0]} receiveShadow position={[ox, 0.0, oy]}>
         <planeGeometry args={[gw / SCALE, gh / SCALE]} />
-        <meshStandardMaterial color="#5a3a24ff" roughness={1} />
+        <meshStandardMaterial color="#9b7653" roughness={1} />
       </mesh>
 
       {/* Static entities */}
@@ -370,8 +422,8 @@ export default function MapGrid({
           gl.shadowMap.type = THREE.PCFSoftShadowMap
         }}
       >
-        <color attach="background" args={['#5a3a24ff']} />
-        <ambientLight intensity={0.2} />
+        <color attach="background" args={['#9b7653']} />
+        <ambientLight intensity={0.5} />
         {/* <directionalLight
           position={[150, 250, 100]} intensity={1.5} castShadow
           shadow-mapSize={[2048, 2048]}

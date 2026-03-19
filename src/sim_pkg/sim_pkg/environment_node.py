@@ -276,91 +276,16 @@ class EnvironmentNode(Node):
     # CA step                                                              #
     # ------------------------------------------------------------------ #
     def _step_ca(self):
-        new_state = [row[:] for row in self._state]
-        new_accum = [row[:] for row in self._accum]
-        new_time = [row[:] for row in self._time_in_st]
-        next_active = set()
-
-        for i, j in self._active:
-            st = self._state[i][j]
-            dt = self._cell_dt(i, j)
-
-            if st == UNBURNT:
-                # Only spread to cells with some forest density
-                if self._density_map[i][j] < 0.1:
-                    continue  # bare ground — fire won't spread here
-                sum_R = 0.0
-                for di in (-1, 0, 1):
-                    for dj in (-1, 0, 1):
-                        if di == dj == 0:
-                            continue
-                        ni, nj = i + di, j + dj
-                        if 0 <= ni < GRID_NX and 0 <= nj < GRID_NY:
-                            # allow heat from EARLY_BURN too
-                            if self._state[ni][nj] in (EARLY_BURN, FULL_BURN):
-                                sum_R += self._spread_speed(ni, nj, i, j)
-
-                incoming = (sum_R / CELL_L) * dt
-                new_accum[i][j] += incoming
-
-                if new_accum[i][j] >= 1.0:
-                    new_state[i][j] = EARLY_BURN
-                    new_time[i][j] = 0.0
-                    next_active.add((i, j))
-                    self._expand_neighbours(i, j)
-                    self._publish_fire_notification(
-                        (i + 0.5) * CELL_L, (j + 0.5) * CELL_L
-                    )
-                # cells stay in next_active if near a fire or accumulating heat
-                elif sum_R > 0.0 or new_accum[i][j] > 0.0:
-                    next_active.add((i, j))
-
-            elif st == EARLY_BURN:
-                new_time[i][j] += dt
-                if new_time[i][j] >= EARLY_TO_FULL_TIME:
-                    new_state[i][j] = FULL_BURN
-                    new_time[i][j] = 0.0
-                    self._expand_neighbours(i, j)
-                next_active.add((i, j))
-
-            elif st == FULL_BURN:
-                new_time[i][j] += dt
-                # loop through neighbors and add UNBURNT to next_active
-                for di in (-1, 0, 1):
-                    for dj in (-1, 0, 1):
-                        if di == dj == 0:
-                            continue
-                        ni, nj = i + di, j + dj
-                        if 0 <= ni < GRID_NX and 0 <= nj < GRID_NY:
-                            if self._state[ni][nj] == UNBURNT:
-                                next_active.add((ni, nj))
-
-                # Transition to EXTINGUISH when new_time[i][j] >= 15.0
-                if new_time[i][j] >= 15.0:
-                    new_state[i][j] = EXTINGUISH
-                    new_time[i][j] = 0.0
-
-                next_active.add((i, j))
-
-            elif st == EXTINGUISH:
-                new_time[i][j] += dt
-                if new_time[i][j] >= EXT_TO_ASH_TIME:
-                    new_state[i][j] = ASH
-                else:
-                    next_active.add((i, j))
-            # ASH — terminal, not re-added
-
-        self._state = new_state
-        self._accum = new_accum
-        self._time_in_st = new_time
-        self._active = next_active
+        # Wildfire spreading and transitions have been disabled.
+        # Fires remain permanently at their static initialized size.
+        pass
 
     # ------------------------------------------------------------------ #
     # Payload                                                              #
     # ------------------------------------------------------------------ #
     def _ca_payload(self):
         cells = []
-        for i, j in self._active:
+        for i, j in list(self._active):
             st = self._state[i][j]
             if st == UNBURNT:
                 continue

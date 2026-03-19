@@ -96,6 +96,6 @@ echo ""
 echo "Press Ctrl+C to stop all services."
 
 
-trap "echo '🛑 Stopping system...'; kill $ENV_PID $DRONE_PID $VISION_PID $METRICS_PID $BACKEND_PID $FRONTEND_PID; exit 0" SIGINT SIGTERM
+trap "echo '🛑 Stopping system...'; kill $ENV_PID $SWARM_PID $VISION_PID $METRICS_PID $BACKEND_PID $FRONTEND_PID; exit 0" SIGINT SIGTERM
 
 wait

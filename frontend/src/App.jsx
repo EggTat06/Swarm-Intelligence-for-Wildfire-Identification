@@ -102,7 +102,11 @@ function App() {
   };
 
   const handleSwarmControl = (action) => {
-    wsSend({ type: 'swarm_control', action });
+    let payload = { type: 'swarm_control', action };
+    if (action === 'remove' && selectedDroneId) {
+      payload.drone_id = selectedDroneId;
+    }
+    wsSend(payload);
     addNotif('info', action === 'add' ? 'Drone added to swarm from base.' : 'Drone removed from swarm.');
   };
 
@@ -154,7 +158,7 @@ function App() {
       duration: (new Date(m.end_time) - new Date(m.start_time)) / 1000,
       first_detection_seconds: m.time_to_first_detection,
       drones_deployed: m.swarm_parameters?.drones || 0,
-      drone_paths: m.drone_paths,
+      drone_paths: m.drone_paths
     };
     setMissionResults(results);
     setShowHistory(false);
