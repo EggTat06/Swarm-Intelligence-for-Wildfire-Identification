@@ -7,11 +7,9 @@ import math
 import uuid
 import sys
 
-# ─── Simulation time scaling ────────────────────────────────────────────────
 REAL_DT = 0.5  # ROS timer tick – real seconds
 SIM_DT = 10.0  # Simulation seconds per tick  (1 real-min = 20 sim-min)
 
-# ─── DSP Physicomimetics parameters ─────────────────────────────────────────
 V_MAX = 45.0  # m/s  (user specified)
 MASS = 1.0  # virtual DSP particle mass
 P_EXP = 2  # Physicomimetics exponent p=2  →  G*R²*(9/16)
@@ -38,9 +36,6 @@ class DroneNode(Node):
         self.telem_sub = self.create_subscription(
             String, "swarm_telemetry", self.telem_callback, 10
         )
-
-        # Peer tracking for decentralized DSP
-        # We store the latest state of other drones here by ID.
         self.peer_states = {}
 
         # Environment & Map
@@ -51,19 +46,13 @@ class DroneNode(Node):
         self.home_y = 150_000.0
 
         self.altitude_levels = [88.0, 91.0, 100.0]
-        self.fire_sensor_range = 5_000.0  # 5 km
+        self.fire_sensor_range = 1_000.0  # 1 km
         self.dsp_reached_threshold = 4_000.0  # 4 km
-
         self.discovered_fires = set()
-
-        # Internal State tracking flags
         self.is_deployed = False
         self.is_returning_home = False
-        self.uptime_ticks = 0  # To implement the boot-up delay
-
-        # Initialization
+        self.uptime_ticks = 0
         self.init_drone()
-
         self.timer = self.create_timer(REAL_DT, self.control_loop)
         self.get_logger().info(
             f"Drone {self.drone_id} initialized | v={self.v:.1f}m/s | dsp=({self.dsp_x:.0f},{self.dsp_y:.0f})"
@@ -151,8 +140,7 @@ class DroneNode(Node):
     def telem_callback(self, msg):
         try:
             d = json.loads(msg.data)
-            # Drones subscribe to the same telemetry topic they publish to.
-            # Only process if this is telemetry from *another* drone.
+
             if (
                 d.get("type") == "drone_heartbeat"
                 and d.get("drone_id") != self.drone_id
@@ -165,7 +153,6 @@ class DroneNode(Node):
                     "dsp_y": d["dsp_y"],
                 }
 
-                # Merge remote discovered fires to prevent duplicate notifications
                 remote_fires = d.get("discovered_fires", [])
                 for fx, fy in remote_fires:
                     self.discovered_fires.add((fx, fy))
@@ -189,12 +176,11 @@ class DroneNode(Node):
     # DSP Physicomimetics (Decentralized)
     # ------------------------------------------------------------------ #
     def _update_dsp(self):
-        # Allow a 2-tick bootup delay to gather peer telemetry before calculating
         self.uptime_ticks += 1
         if self.uptime_ticks < 3:
             return
 
-        N = len(self.peer_states) + 1  # Total swarm size = peers + self
+        N = len(self.peer_states) + 1
 
         gw = self.world_w
         gh = self.world_h
@@ -208,7 +194,6 @@ class DroneNode(Node):
         Fmax = V_MAX * MASS / SIM_DT
         G_const = Fmax * (R**2) * (9.0 / 16.0)
 
-        # Net force on THIS drone's DSP point
         fx, fy = 0.0, 0.0
 
         # ── Border repulsion ──────────────────────────────────────────
@@ -298,7 +283,7 @@ class DroneNode(Node):
         elif self.state == "RETURNING_HOME":
             self.target_heading = math.atan2(self.home_y - self.y, self.home_x - self.x)
             dist_to_home = math.hypot(self.home_x - self.x, self.home_y - self.y)
-            if dist_to_home <= 500.0:
+            if dist_to_home <= 1000.0:
                 self.state = "LANDED"
                 self.x = self.home_x
                 self.y = self.home_y
@@ -358,8 +343,6 @@ class DroneNode(Node):
 
         if self.is_deployed:
             self._sense_fires()
-
-        # Publish heartbeat (NO PATH HISTORY)
         msg = String()
         msg.data = json.dumps(
             {
@@ -385,13 +368,9 @@ class DroneNode(Node):
         )
         self.telemetry_pub.publish(msg)
 
-        # Cleanup stale peers here if needed, but for now assume persistent connection within sim
-
 
 def main(args=None):
     rclpy.init(args=args)
-
-    # Allow passing a specific ID via command line (used by manager)
     drone_id = None
     is_deployed = False
     for arg in sys.argv[1:]:

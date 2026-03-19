@@ -3,10 +3,9 @@ import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import { OrbitControls, Environment } from '@react-three/drei'
 import * as THREE from 'three'
 
-// 100km world → 200 Three.js units wide. 1 Three.js unit = 500m.
 const SCALE = 500.0
 
-// Cell state → color mapping
+
 const STATE_COLORS = {
   1: '#ffcc00',   // Early burn – yellow
   2: '#ff3300',   // Full burn  – red
@@ -14,12 +13,9 @@ const STATE_COLORS = {
   4: '#222222',   // Ash        – dark grey
 }
 
-// ─────────────────────────────────────────────
-// CA Cell quad (flat box on ground plane)
-// ─────────────────────────────────────────────
 function CaCell({ cell }) {
   const color = STATE_COLORS[cell.state] || '#ff3300'
-  const cellSize = 500 / SCALE   // 500m in Three.js units
+  const cellSize = 1500 / SCALE
   const ref = useRef()
 
   useFrame(({ clock }) => {
@@ -42,10 +38,10 @@ function CaCell({ cell }) {
 }
 
 // ─────────────────────────────────────────────
-// Fog of war – explored circles (2D disc on ground)
+// Explored circles (2D disc on ground)
 // ─────────────────────────────────────────────
 function ExploredCircles({ exploredCells, gridOffset }) {
-  const radius = 6000 / SCALE
+  const radius = 1000 / SCALE
   return (
     <group position={[-gridOffset, 0.02, -gridOffset]}>
       {Array.from(exploredCells).map(key => {
@@ -118,16 +114,15 @@ function Drone({ pose, isSelected, onSelect }) {
           <sphereGeometry args={[isSelected ? 1.1 : 0.8, 16, 16]} />
           <meshStandardMaterial color={droneColor} emissive={droneColor} emissiveIntensity={2.5} />
         </mesh>
-        {/* 6km sensor range ring */}
+        {/* 1km sensor range ring */}
         <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.3, 0]}>
-          <ringGeometry args={[6000 / SCALE - 0.15, 6000 / SCALE, 48]} />
+          <ringGeometry args={[1000 / SCALE - 0.15, 1000 / SCALE, 48]} />
           <meshBasicMaterial color={droneColor} transparent opacity={isSelected ? 0.5 : 0.2} side={THREE.DoubleSide} />
         </mesh>
         {isSelected && (
           <pointLight color={droneColor} intensity={3} distance={15} />
         )}
       </group>
-      {/* DSP target point (always visible, more prominent when selected) */}
       {pose.dsp_x != null && (
         <group ref={dspRef}>
           <mesh>
@@ -137,7 +132,6 @@ function Drone({ pose, isSelected, onSelect }) {
           </mesh>
           {isSelected && (
             <>
-              {/* Wireframe circle showing DSP area of influence */}
               <mesh rotation={[-Math.PI / 2, 0, 0]}>
                 <ringGeometry args={[10, 12, 48]} />
                 <meshBasicMaterial color="#a855f7" transparent opacity={0.3} side={THREE.DoubleSide} />
@@ -176,12 +170,12 @@ function CommandArrow({ targetX, targetY }) {
 
   return (
     <group ref={ref}>
-      {/* Square outline reticle */}
+
       <mesh rotation={[-Math.PI / 2, 0, 0]}>
         <ringGeometry args={[2.5, 3.5, 4, 1]} />
         <meshBasicMaterial color="#ff0044" transparent opacity={0.9} side={THREE.DoubleSide} />
       </mesh>
-      {/* 4 inward-pointing triangles */}
+
       <mesh position={[0, 0, -3.5]} rotation={[-Math.PI / 2, 0, 0]}>
         <coneGeometry args={[1.5, 3, 3]} />
         <meshBasicMaterial color="#ff0044" />
@@ -234,7 +228,7 @@ function Lake({ entity }) {
   return (
     <mesh position={[entity.x / SCALE, 0.05, entity.y / SCALE]} rotation={[-Math.PI / 2, 0, 0]}>
       <planeGeometry args={[entity.size / SCALE, entity.size / SCALE]} />
-      <meshStandardMaterial color="#0255adff" transparent opacity={0.7} roughness={0.1} />
+      <meshStandardMaterial color="#06b6d4" transparent opacity={0.7} roughness={0.1} />
     </mesh>
   )
 }
@@ -242,7 +236,7 @@ function Forest({ entity }) {
   return (
     <mesh castShadow position={[entity.x / SCALE, 0.7, entity.y / SCALE]}>
       <coneGeometry args={[entity.size / (SCALE * 1.8), 2, 8]} />
-      <meshStandardMaterial color="#1e5235" roughness={0.8} />
+      <meshStandardMaterial color="#22c55e" roughness={0.8} />
     </mesh>
   )
 }
@@ -256,13 +250,11 @@ function CommandPlane({ selectedDroneId, onMapCommand, gridOffset }) {
     e.stopPropagation()
     if (!selectedDroneId) return
     const point = e.point
-    // Convert Three.js space → world metres
     const worldX = (point.x + gridOffset) * SCALE
     const worldY = (point.z + gridOffset) * SCALE
     onMapCommand(selectedDroneId, worldX, worldY)
   }, [selectedDroneId, onMapCommand, gridOffset])
 
-  // When no drone is selected, don't intercept clicks at all
   if (!selectedDroneId) return null
 
   return (
@@ -308,7 +300,7 @@ function World({ envState, identifiedFires, exploredCells, selectedDroneId, onMa
         <CaCell key={`${cell.i}_${cell.j}`} cell={cell} />
       ))}
 
-      {/* Explored fog-of-war circles */}
+      {/* Explored circles */}
       <ExploredCircles exploredCells={exploredCells} gridOffset={0} />
 
       {/* Home Base ring */}
@@ -330,15 +322,12 @@ function MapLegend() {
   const [open, setOpen] = useState(true)
 
   const items = [
-    { color: '#1e5235', label: 'Forest', shape: '▲' },
-    { color: '#0a2c59', label: 'Lake', shape: '■' },
+    { color: '#22c55e', label: 'Forest', shape: '▲' },
+    { color: '#06b6d4', label: 'Lake', shape: '■' },
     { color: '#2e3b4e', label: 'Building', shape: '■' },
     { color: '#4a4a4a', label: 'Factory', shape: '■' },
-    { color: '#ffcc00', label: 'Early Fire', shape: '●' },
-    { color: '#ff3300', label: 'Full Fire', shape: '●' },
-    { color: '#8b1a1a', label: 'Extinguishing', shape: '●' },
-    { color: '#333333', label: 'Ash', shape: '■' },
-    { color: '#00ffcc', label: 'Drone / Sensor', shape: '○' },
+    { color: '#ff3300', label: 'Fire', shape: '●' },
+    { color: '#ffffffff', label: 'Drone / Sensor', shape: '○' },
     { color: '#a855f7', label: 'DSP Target', shape: '◆' },
     { color: '#00ffcc', label: 'Explored Area', shape: '○' },
     { color: '#ff4500', label: 'Home Base', shape: '○' },
@@ -384,7 +373,7 @@ export default function MapGrid({
 }) {
   const gridOffset = envState?.grid?.width ? envState.grid.width / (2 * SCALE) : 100
 
-  // Fog of war: track explored cell keys "x|z" in Three.js space
+  // Explored cells
   const [exploredCells, setExploredCells] = useState(new Set())
 
   useEffect(() => {
@@ -396,7 +385,7 @@ export default function MapGrid({
 
   useEffect(() => {
     if (!active) return
-    const radius = 6000 / SCALE
+    const radius = 1000 / SCALE
     const step = radius * 1.2
     setExploredCells(prev => {
       const next = new Set(prev)
@@ -423,7 +412,7 @@ export default function MapGrid({
         }}
       >
         <color attach="background" args={['#9b7653']} />
-        <ambientLight intensity={0.5} />
+        <ambientLight intensity={0.7} />
         {/* <directionalLight
           position={[150, 250, 100]} intensity={1.5} castShadow
           shadow-mapSize={[2048, 2048]}

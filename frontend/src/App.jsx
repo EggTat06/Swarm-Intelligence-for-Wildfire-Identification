@@ -7,8 +7,10 @@ import DroneFootage from './components/DroneFootage';
 // Unique notification factory — timestamps in Malaysia Time (UTC+8)
 let notifIdCounter = 0;
 const MYT = {
-  timeZone: 'Asia/Kuala_Lumpur', hour12: false,
-  hour: '2-digit', minute: '2-digit', second: '2-digit'
+  timeZone: 'Asia/Kuala_Lumpur',
+  year: 'numeric', month: '2-digit', day: '2-digit',
+  hour: '2-digit', minute: '2-digit', second: '2-digit',
+  hour12: false
 };
 const makeNotif = (type, msg, drone_id = null, coords = null) => ({
   id: ++notifIdCounter,
