@@ -25,13 +25,17 @@ function CaCell({ cell }) {
   })
 
   return (
-    <group ref={ref} position={[cell.x / SCALE, cell.state === 2 ? 0.3 : 0.1, cell.y / SCALE]}>
+    <group ref={ref} position={[cell.x / SCALE, cell.state === 2 ? 1.5 : 0.1, cell.y / SCALE]}>
       <mesh castShadow>
-        <boxGeometry args={[cellSize * 0.9, cell.state === 2 ? 0.6 : 0.2, cellSize * 0.9]} />
-        <meshStandardMaterial color={color} emissive={color} emissiveIntensity={cell.state === 2 ? 1.5 : 0.5} />
+        {cell.state === 2 ? (
+          <coneGeometry args={[cellSize * 1.5, 4.5, 8]} />
+        ) : (
+          <boxGeometry args={[cellSize * 0.9, 0.2, cellSize * 0.9]} />
+        )}
+        <meshStandardMaterial color={color} emissive={color} emissiveIntensity={cell.state === 2 ? 2.5 : 0.5} />
       </mesh>
       {cell.state <= 2 && (
-        <pointLight color={color} intensity={cell.state === 2 ? 2 : 0.5} distance={8} />
+        <pointLight color={color} intensity={cell.state === 2 ? 4 : 0.5} distance={12} />
       )}
     </group>
   )

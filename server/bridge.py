@@ -134,6 +134,7 @@ class FastAPIBridgeNode(Node):
                         {
                             "drones": report["drones_deployed"],
                             "coverage": report["area_coverage_pct"],
+                            "fires_identified": report["fires_identified"],
                         }
                     ),
                     report["first_detection_seconds"],
@@ -223,6 +224,16 @@ async def get_missions():
         rows = cur.fetchall()
         cur.close()
         conn.close()
+
+        for row in rows:
+            sp = row.get("swarm_parameters", {})
+            if isinstance(sp, str):
+                try:
+                    sp = json.loads(sp)
+                except Exception:
+                    sp = {}
+            row["fires_identified"] = sp.get("fires_identified", 0)
+
         return rows
     except Exception as e:
         print(f"Error fetching missions: {e}")

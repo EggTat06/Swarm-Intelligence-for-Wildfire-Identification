@@ -1,7 +1,7 @@
 ================================================================================
   SWARM WILDFIRE IDENTIFICATION SYSTEM — DEVELOPER DOCUMENTATION
 ================================================================================
-Last updated: 2026-03-11
+Last updated: 2026-03-20
 Project Root: /mnt/c/coding/swarm_wildfire_project
 
 --------------------------------------------------------------------------------
@@ -11,7 +11,7 @@ TABLE OF CONTENTS
   2. Project Structure
   3. How to Run the System
   4. ROS 2 Nodes — What Each One Does
-  5. The Swarm Algorithm — Subsumption Architecture
+  5. The Swarm Algorithm — DSP Physicomimetics
   6. How to Tune the Algorithm
   7. Message Passing Between Nodes (ROS 2 Topics)
   8. How to Control the Number of Drones
@@ -57,6 +57,7 @@ swarm_wildfire_project/
 │           ├── drone_node.py         — Drone swarm agent logic + algorithm
 │           ├── environment_node.py   — Environment simulator (wind, grid, etc.)
 │           ├── metrics_node.py       — DB writer (telemetry, detections, missions)
+│           ├── swarm_manager_node.py — Central C&C, subprocess manager, state aggregator
 │           └── vision_processing.py  — YOLO fire detection / mock inference
 └── venv/                         — Python virtual environment
 
@@ -74,7 +75,7 @@ The script automatically:
   2. Sources ROS 2 Jazzy and creates/activates the Python virtual environment.
   3. Installs Python deps (fastapi, uvicorn, psycopg2-binary, ultralytics).
   4. Builds the ROS 2 workspace with `colcon build --symlink-install`.
-  5. Launches all 4 ROS 2 nodes in the background.
+  5. Launches all core ROS 2 nodes (environment, swarm_manager, vision, metrics) in the background.
   6. Starts the FastAPI backend on port 8000.
   7. Starts the Vite frontend dev server on port 5173.
 
@@ -96,19 +97,27 @@ Access points once running:
   Simulates the physical environment. Publishes a JSON state every 5 seconds
   to the `environment_state` topic containing:
     - Grid dimensions (width × height in meters)
-    - Season (e.g., "Summer")
     - Canopy density (0.0–1.0)
     - Wind speed and direction (with random drift each cycle)
     - Base terrain elevation
 
+  FILE: src/sim_pkg/sim_pkg/swarm_manager_node.py
+  NODE NAME: swarm_manager_node
+  ─────────────────────────────────────────────────────
+  Acts as the Central Command. It:
+    - Spawns and kills `drone_node.py` subprocesses dynamically.
+    - Aggregates telemetry from all drones via `swarm_telemetry` and computes real-time area coverage maps.
+    - Emits a unified payload on `drone_telemetry` for the frontend.
+
   FILE: src/sim_pkg/sim_pkg/drone_node.py
   NODE NAME: drone_node_<6-char-uuid>  (unique per instance)
   ─────────────────────────────────────────────────────────────
-  The drone_node will implement swarm algorithm (see Section 5).
+  The drone_node implements the swarm algorithm (see Section 5).
   Each instance represents a single autonomous drone. It:
-    - Subscribes to `environment_state` for wind/grid data.
-    - Runs a control loop every 1 second to update position and heading.
-    - Publishes telemetry (position, battery, pheromone level) to `drone_telemetry`.
+    - Subscribes to `environment_state` and `swarm_control`.
+    - Runs a control loop every 0.5s (real time) to update DSP kinematics.
+    - Senses fires locally from `environment_state` (bypassing legacy YOLO in sim).
+    - Publishes state to `swarm_telemetry` (aggregated by the manager).
 
   FILE: src/sim_pkg/sim_pkg/vision_processing.py
   NODE NAME: vision_processing
@@ -131,58 +140,42 @@ Access points once running:
 
 
 ================================================================================
-  5. THE SWARM ALGORITHM — SUBSUMPTION ARCHITECTURE
+  5. THE SWARM ALGORITHM — DSP PHYSICOMIMETICS
 ================================================================================
   File:     src/sim_pkg/sim_pkg/drone_node.py
-  Function: apply_subsumption_logic()  (line ~64)
+  Function: _update_dsp() and _update_kinematics()
 
-The drone uses a 3-level Subsumption Architecture — a behaviour-based
-robotics approach where lower-priority behaviours are suppressed by higher-
-priority ones. Levels are evaluated from lowest to highest priority:
+The drone swarm utilizes a decentralized Dynamic Space Partitioning (DSP)
+based on Physicomimetics (Virtual Physics). Drones act as physical particles
+experiencing forces:
 
-  LEVEL 1 — Random Perturbation (Obstacle Avoidance)
-  ────────────────────────────────────────────────────
-  With a 5% probability per control loop tick, the drone randomly adjusts
-  its heading by ±20 degrees. This prevents drones from getting stuck in
-  repetitive paths (simulating obstacle avoidance / local minima escape).
+  COMPUTING ATTRACTION / REPULSION
+  ──────────────────────────────────
+  Each drone broadcasts its virtual particle (DSP) position. The available
+  domain is dynamically partitioned into equal search areas based on N (the
+  total number of active drones). A gravitational constant is derived from
+  this ideal radius.
 
-    if random.random() < 0.05:
-        self.heading += random.uniform(-20, 20)
+  Drones exert a pairwise force on each other:
+    - Repulsive, if they are too close to each other.
+    - Attractive, if they are drifting too far out of ideal coverage distance.
 
-  LEVEL 2 — Boundary Adherence (higher priority than Level 1)
-  ─────────────────────────────────────────────────────────────
-  If the drone comes within 50 m of any grid edge, it turns to face the
-  grid centre. This keeps all drones within the search area at all times.
+  BORDER REPULSION
+  ─────────────────
+  Additionally, borders act as uniform repulsive walls to prevent the virtual
+  points from exiting the simulation boundary (e.g., leaving the 300km x 300km
+  search area).
 
-    padding = 50  # metres from the edge
-    if near_boundary:
-        self.heading = atan2(centre_y - y, centre_x - x)
-
-  LEVEL 3 — Dynamic Space Partitioning / Pheromone Wind Tracking
-  ───────────────────────────────────────────────────────────────
-  With a 10% probability per tick, the drone overrides its heading to
-  fly perpendicular to the current wind direction. This cross-wind search
-  pattern maximises area coverage (sweep search), which is the optimal
-  strategy for detecting fire smoke/heat carried on the wind.
-
-    if random.random() < 0.1:
-        self.heading = (wind_direction + 90) % 360
-
-  PHEROMONE MECHANISM
-  ────────────────────
-  Each drone transmits a "pheromone" value proportional to the local
-  canopy density (from environment_node). This is intended to represent
-  how strongly a drone marks a region as visited — denser canopy means
-  more potential fire fuel, so the drone signals stronger coverage need.
-
-    phero = 1.0 * env_data["canopy_density"]
+  KINEMATIC TRACKING
+  ───────────────────
+  The drone physically attempts to fly via a PID heading controller toward
+  its assigned DSP virtual particle. Once it reaches the particle, it shifts
+  into a RANDOM_WALK exploration state until the particle moves away.
 
   BATTERY MODEL
   ──────────────
-  Each drone consumes 0.1% battery per control loop tick (every second).
-  After 1000 seconds, battery reaches 0 and the drone stops.
-
-    self.battery -= 0.1
+  Each drone consumes 0.001 battery units per simulation second. Once battery
+  reaches 0, the drone process exits.
 
 
 ================================================================================
@@ -190,16 +183,15 @@ priority ones. Levels are evaluated from lowest to highest priority:
 ================================================================================
 All tuneable parameters are localised in drone_node.py. Key values:
 
-  Parameter                  | Location                     | Default  | Effect
-  ─────────────────────────────────────────────────────────────────────────────────
-  speed                      | __init__ (line 27)           | 10.0 m/s | Drone speed
-  altitude                   | __init__ (line 24)           | 100.0 m  | Flight altitude
-  Random jitter probability  | apply_subsumption_logic L1   | 0.05     | Exploration chaos
-  Random jitter magnitude    | apply_subsumption_logic L1   | ±20 deg  | Turn sharpness
-  Boundary padding           | apply_subsumption_logic L2   | 50 m     | Edge buffer zone
-  Wind align probability     | apply_subsumption_logic L3   | 0.10     | How often cross-wind
-  Battery drain rate         | control_loop (line 45)       | 0.1/tick | Endurance
-  Control loop interval      | create_timer (line 32)       | 1.0 sec  | Update frequency
+  Parameter                  | Location                     | Default   | Effect
+  ──────────────────────────────────────────────────────────────────────────────────
+  V_MAX                      | Global var                   | 45.0 m/s  | Max assumed coverage speed
+  MASS                       | Global var                   | 1.0       | Virtual point mass multiplier
+  altitude                   | init_drone()                 | 88–100m   | Flight altitude
+  Random jitter probability  | _update_kinematics()         | 0.05      | Random walk variance
+  Fire sensor range          | __init__                     | 1,000m    | Detection radius local to drone
+  Battery drain rate         | _update_kinematics()         | 0.001/sec | Endurance
+  Control loop interval      | __init__                     | 0.5s real | Update frequency mapped to 10s sim
 
   Environment parameters (environment_node.py):
   Parameter                  | Default      | Effect
@@ -222,12 +214,13 @@ All tuneable parameters are localised in drone_node.py. Key values:
 All communication uses the ROS 2 pub/sub model over named topics.
 Messages are serialised as JSON strings in std_msgs/String.
 
-  TOPIC NAME          | PUBLISHED BY        | SUBSCRIBED BY                   | Frequency
-  ───────────────────────────────────────────────────────────────────────────────────────
-  environment_state   | environment_node    | drone_node (all instances)      | Every 5s
-  drone_telemetry     | drone_node          | vision_processing, metrics_node | Every 1s (per drone)
-  yolo_detections     | vision_processing   | metrics_node                    | On detection event
-  mission_control     | (UI / manual)       | metrics_node                    | On demand
+  TOPIC NAME          | PUBLISHED BY         | SUBSCRIBED BY                    | Frequency
+  ──────────────────────────────────────────────────────────────────────────────────────────
+  environment_state   | environment_node     | drone_node, swarm_manager_node   | Every 5s
+  swarm_telemetry     | drone_node           | peer drones, swarm_manager_node  | Every 0.5s (per drone)
+  drone_telemetry     | swarm_manager_node   | bridge (FastAPI), metrics_node   | Aggregated, every 0.5s
+  swarm_control       | bridge (via API/UI)  | swarm_manager_node, drone_node   | On demand
+  yolo_detections     | vision_processing    | metrics_node                     | On detection event (deprecated in sim)
 
   MESSAGE FORMATS
   ────────────────
@@ -268,46 +261,28 @@ Messages are serialised as JSON strings in std_msgs/String.
 ================================================================================
   8. HOW TO CONTROL THE NUMBER OF DRONES
 ================================================================================
-Currently, each instance of drone_node represents exactly ONE drone.
-To deploy multiple drones, you launch the node multiple times.
+The execution and lifecycle of drones is entirely managed by `swarm_manager_node.py`.
+You DO NOT need to launch `drone_node.py` manually or use `.launch.py` files.
 
-  OPTION A — Manually (during development/testing):
-  ───────────────────────────────────────────────────
-  Open separate terminals (or use tmux) and run:
+  HOW IT WORKS
+  ─────────────
+  The manager process runs continuously and waits for commands over the
+  `swarm_control` ROS topic (typically bridged from the React UI "Add Drone"
+  button).
 
-    ros2 run sim_pkg drone_node &
-    ros2 run sim_pkg drone_node &
-    ros2 run sim_pkg drone_node &
-    # ... one command per drone
+  When the manager receives an "add" command:
+    1. It spawns a new raw Python subprocess executing `drone_node.py`.
+    2. It tracks the child process PID and stores it.
 
-  Each instance auto-generates a unique ID (drone_node_<6-char-uuid>)
-  and spawns at a random initial position within the grid.
+  When it receives a "remove" command:
+    1. It finds an active process, terminates it via SIGTERM.
+    2. Cleans up internal state references dynamically.
 
-  OPTION B — Via a Launch File (recommended for larger swarms):
-  ──────────────────────────────────────────────────────────────
-  Create a ROS 2 launch file at:
-    src/sim_pkg/launch/swarm_launch.py
-
-  Example content to launch 10 drones:
-
-    from launch import LaunchDescription
-    from launch_ros.actions import Node
-
-    NUM_DRONES = 10  # <-- Change this number here
-
-    def generate_launch_description():
-        nodes = [Node(package='sim_pkg', executable='drone_node') for _ in range(NUM_DRONES)]
-        return LaunchDescription(nodes)
-
-  Then run with:
-    ros2 launch sim_pkg swarm_launch.py
-
-  KEY FUNCTIONS related to drone identity and init:
-  ──────────────────────────────────────────────────
-    DroneNode.__init__()        — Sets unique ID, random start position, all state
-    DroneNode.control_loop()    — Called every 1s; movement + battery consumption
-    DroneNode.apply_subsumption_logic() — The swarm algorithm (see Section 5)
-    DroneNode.publish_telemetry()       — Formats and publishes drone state to ROS
+  KEY FUNCTIONS:
+  ───────────────
+    SwarmManagerNode.add_drone()      — Spawns Python worker
+    SwarmManagerNode.remove_drone()   — Kills a worker safely
+    DroneNode.control_loop()          — Subprocess physics and lifecycle tick
 
 
 ================================================================================
@@ -355,8 +330,8 @@ schema contains 3 tables:
     time_to_first_detection  | FLOAT       | Seconds until first fire detect
     success                  | BOOLEAN     | Whether fire was found
 
-  Written by: metrics_node.py → mission_callback() when action="start"/"end"
-  Triggered via: `mission_control` ROS topic
+  Written by: metrics_node.py → mission_callback()
+  Triggered via telemetry payload when mission ends or begins.
 
   ── TABLE: telemetry (TimescaleDB Hypertable) ───────────────────────────────
   High-frequency position and status log for every drone, every second.

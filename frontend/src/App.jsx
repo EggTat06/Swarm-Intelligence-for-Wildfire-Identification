@@ -153,9 +153,19 @@ function App() {
     }
   };
 
+  const handleClearHistory = async () => {
+    try {
+      await fetch('http://localhost:8000/history/missions', { method: 'DELETE' });
+      setHistory([]);
+      addNotif('info', 'Mission history cleared from database.');
+    } catch (err) {
+      console.error('Failed to clear history:', err);
+    }
+  };
+
   const handleViewHistoricalMission = (m) => {
     const results = {
-      fires_identified: m.fires_identified || 0,
+      fires_identified: m.swarm_parameters?.fires_identified || m.fires_identified || 0,
       area_coverage_pct: m.swarm_parameters?.coverage || 0,
       duration: (new Date(m.end_time) - new Date(m.start_time)) / 1000,
       first_detection_seconds: m.time_to_first_detection,
@@ -413,7 +423,15 @@ function App() {
               <h2 className="text-xl font-bold uppercase tracking-widest flex items-center gap-3">
                 <Activity className="text-emerald-400" /> Mission History Log
               </h2>
-              <button onClick={() => setShowHistory(false)} className="text-slate-400 hover:text-white">✕</button>
+              <div className="flex items-center gap-4">
+                <button
+                  onClick={handleClearHistory}
+                  className="px-4 py-1.5 bg-red-500/20 hover:bg-red-500/40 text-red-400 text-xs font-bold uppercase tracking-wider rounded transition"
+                >
+                  Clear History
+                </button>
+                <button onClick={() => setShowHistory(false)} className="text-slate-400 hover:text-white">✕</button>
+              </div>
             </div>
             <div className="flex-1 overflow-y-auto p-6">
               <table className="w-full border-collapse">

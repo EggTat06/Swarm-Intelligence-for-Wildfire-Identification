@@ -79,8 +79,13 @@ class SwarmManagerNode(Node):
     def add_drone(self, drone_id=None):
         drone_id = drone_id or ("drone_" + str(uuid.uuid4())[:6])
 
-        # Use ros2 run to ensure colcon environment is respected
-        cmd = ["ros2", "run", "sim_pkg", "drone_node", drone_id]
+        # Use direct python execution to bypass 'ros2 run' overhead (slow search/source)
+        # We assume drone_node.py is in the same directory as this script.
+        import sys
+
+        script_path = os.path.join(os.path.dirname(__file__), "drone_node.py")
+        cmd = [sys.executable, script_path, drone_id]
+
         if self.mission_start_time is not None:
             cmd.append("--deployed")
 
@@ -89,6 +94,7 @@ class SwarmManagerNode(Node):
             stdout=subprocess.DEVNULL,
             preexec_fn=os.setsid,
             stderr=subprocess.STDOUT,
+            env=os.environ.copy(),  # Ensure ROS 2 env is inherited
         )
         self.active_drones[drone_id] = proc
         self.drone_paths[drone_id] = [[self.home_x, self.home_y]]
